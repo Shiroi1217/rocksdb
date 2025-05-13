@@ -36,13 +36,14 @@ LIB_SOURCES =                                                   \
   db/compaction/compaction.cc                                   \
   db/compaction/compaction_iterator.cc                          \
   db/compaction/compaction_job.cc                               \
+  db/compaction/compaction_outputs.cc                           \
   db/compaction/compaction_picker.cc                            \
   db/compaction/compaction_picker_fifo.cc                       \
   db/compaction/compaction_picker_level.cc                      \
   db/compaction/compaction_picker_universal.cc                  \
+  db/compaction/compaction_predictor.cc                         \
   db/compaction/compaction_service_job.cc                       \
   db/compaction/compaction_state.cc                             \
-  db/compaction/compaction_outputs.cc                           \
   db/compaction/sst_partitioner.cc                              \
   db/compaction/subcompaction_state.cc                          \
   db/convenience.cc                                             \
@@ -314,8 +315,8 @@ LIB_SOURCES =                                                   \
   utilities/trace/file_trace_reader_writer.cc                   \
   utilities/trace/replayer_impl.cc                              \
   utilities/transactions/lock/lock_manager.cc                   \
-  utilities/transactions/lock/point/point_lock_tracker.cc       \
   utilities/transactions/lock/point/point_lock_manager.cc       \
+  utilities/transactions/lock/point/point_lock_tracker.cc       \
   utilities/transactions/optimistic_transaction.cc              \
   utilities/transactions/optimistic_transaction_db_impl.cc      \
   utilities/transactions/pessimistic_transaction.cc             \

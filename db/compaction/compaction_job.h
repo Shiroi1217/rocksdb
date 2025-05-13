@@ -21,6 +21,7 @@
 #include "db/column_family.h"
 #include "db/compaction/compaction_iterator.h"
 #include "db/compaction/compaction_outputs.h"
+#include "db/compaction/compaction_predictor.h"
 #include "db/flush_scheduler.h"
 #include "db/internal_stats.h"
 #include "db/job_context.h"
@@ -196,6 +197,12 @@ class CompactionJob {
   IOStatus io_status() const { return io_status_; }
 
  protected:
+  // 预测即将进行compaction的文件并输出到日志
+  void PredictNextCompactionFiles();
+  
+  // 更新CompactionPredictor的预测集合，移除已经compaction的文件
+  void UpdateCompactionPrediction();
+  
   void UpdateCompactionJobOutputStats(
       const InternalStats::CompactionStatsFull& internal_stats) const;
 

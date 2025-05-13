@@ -10,13 +10,20 @@
 #include "db/compaction/compaction_job.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
-#include <memory>
-#include <optional>
+#include <map>
+#include <numeric>
 #include <set>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "db/column_family.h"
+#include "db/compaction/compaction.h"
+#include "db/compaction/compaction_iterator.h"
+#include "db/compaction/compaction_outputs.h"
+#include "db/compaction/compaction_predictor.h"
 #include "db/blob/blob_counting_iterator.h"
 #include "db/blob/blob_file_addition.h"
 #include "db/blob/blob_file_builder.h"
@@ -130,24 +137,24 @@ CompactionJob::CompactionJob(
     int job_id, Compaction* compaction, const ImmutableDBOptions& db_options,
     const MutableDBOptions& mutable_db_options, const FileOptions& file_options,
     VersionSet* versions, const std::atomic<bool>* shutting_down,
-    LogBuffer* log_buffer, FSDirectory* db_directory,
-    FSDirectory* output_directory, FSDirectory* blob_output_directory,
-    Statistics* stats, InstrumentedMutex* db_mutex,
-    ErrorHandler* db_error_handler,
+    LogBuffer* log_buffer,
+    FSDirectory* db_directory, FSDirectory* output_directory,
+    FSDirectory* blob_output_directory, Statistics* stats,
+    InstrumentedMutex* db_mutex, ErrorHandler* db_error_handler,
     std::vector<SequenceNumber> existing_snapshots,
     SequenceNumber earliest_write_conflict_snapshot,
     const SnapshotChecker* snapshot_checker, JobContext* job_context,
     std::shared_ptr<Cache> table_cache, EventLogger* event_logger,
     bool paranoid_file_checks, bool measure_io_stats, const std::string& dbname,
-    CompactionJobStats* compaction_job_stats, Env::Priority thread_pri,
-    const std::shared_ptr<IOTracer>& io_tracer,
+    CompactionJobStats* compaction_job_stats,
+    Env::Priority thread_pri, const std::shared_ptr<IOTracer>& io_tracer,
     const std::atomic<bool>& manual_compaction_canceled,
     const std::string& db_id, const std::string& db_session_id,
     std::string full_history_ts_low, std::string trim_ts,
     BlobFileCompletionCallback* blob_callback, int* bg_compaction_scheduled,
     int* bg_bottom_compaction_scheduled)
-    : compact_(new CompactionState(compaction)),
-      internal_stats_(compaction->compaction_reason(), 1),
+    : compact_(nullptr),
+      internal_stats_(),
       db_options_(db_options),
       mutable_db_options_copy_(mutable_db_options),
       log_buffer_(log_buffer),
@@ -155,6 +162,7 @@ CompactionJob::CompactionJob(
       stats_(stats),
       bottommost_level_(false),
       write_hint_(Env::WLTH_NOT_SET),
+      io_status_(),
       job_stats_(compaction_job_stats),
       job_id_(job_id),
       dbname_(dbname),
@@ -163,9 +171,8 @@ CompactionJob::CompactionJob(
       file_options_(file_options),
       env_(db_options.env),
       io_tracer_(io_tracer),
-      fs_(db_options.fs, io_tracer),
-      file_options_for_read_(
-          fs_->OptimizeForCompactionTableRead(file_options, db_options_)),
+      fs_(db_options.env->GetFileSystem(), io_tracer),
+      file_options_for_read_(file_options),
       versions_(versions),
       shutting_down_(shutting_down),
       manual_compaction_canceled_(manual_compaction_canceled),
@@ -174,16 +181,15 @@ CompactionJob::CompactionJob(
       db_mutex_(db_mutex),
       db_error_handler_(db_error_handler),
       existing_snapshots_(std::move(existing_snapshots)),
-      earliest_snapshot_(existing_snapshots_.empty()
-                             ? kMaxSequenceNumber
-                             : existing_snapshots_.at(0)),
+      earliest_snapshot_(0),
       earliest_write_conflict_snapshot_(earliest_write_conflict_snapshot),
       snapshot_checker_(snapshot_checker),
       job_context_(job_context),
-      table_cache_(std::move(table_cache)),
+      table_cache_(table_cache),
       event_logger_(event_logger),
       paranoid_file_checks_(paranoid_file_checks),
       measure_io_stats_(measure_io_stats),
+      boundaries_(),
       thread_pri_(thread_pri),
       full_history_ts_low_(std::move(full_history_ts_low)),
       trim_ts_(std::move(trim_ts)),
@@ -191,6 +197,8 @@ CompactionJob::CompactionJob(
       extra_num_subcompaction_threads_reserved_(0),
       bg_compaction_scheduled_(bg_compaction_scheduled),
       bg_bottom_compaction_scheduled_(bg_bottom_compaction_scheduled) {
+  assert(compaction != nullptr);
+  compact_ = new CompactionState(compaction);
   assert(job_stats_ != nullptr);
   assert(log_buffer_ != nullptr);
 
@@ -199,6 +207,40 @@ CompactionJob::CompactionJob(
   ThreadStatusUtil::SetColumnFamily(cfd);
   ThreadStatusUtil::SetThreadOperation(ThreadStatus::OP_COMPACTION);
   ReportStartedCompaction(compaction);
+  
+  // 新增：创建预测器并预测即将进行compaction的文件
+  PredictNextCompactionFiles();
+}
+
+void CompactionJob::PredictNextCompactionFiles() {
+  if (compact_ == nullptr || compact_->compaction == nullptr) {
+    return;
+  }
+  
+  // 获取VersionStorageInfo对象
+  const VersionStorageInfo* vstorage = compact_->compaction->input_version()->storage_info();
+  if (vstorage == nullptr) {
+    return;
+  }
+  
+  // 创建CompactionPredictor对象
+  CompactionPredictor predictor(vstorage);
+  
+  // 预测下一轮compaction会包含哪些文件
+  std::set<std::string> predicted_files = predictor.PredictCompactionFiles();
+  
+  // 记录预测的文件
+  if (!predicted_files.empty()) {
+    ROCKS_LOG_INFO(db_options_.info_log,
+                   "[%s] 预测下次compaction可能会包含的文件: %s",
+                   compact_->compaction->column_family_data()->GetName().c_str(),
+                   std::accumulate(
+                       std::next(predicted_files.begin()), predicted_files.end(),
+                       *predicted_files.begin(),
+                       [](const std::string& a, const std::string& b) {
+                         return a + ", " + b;
+                       }).c_str());
+  }
 }
 
 CompactionJob::~CompactionJob() {
@@ -670,6 +712,10 @@ Status CompactionJob::Run() {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_COMPACTION_RUN);
   TEST_SYNC_POINT("CompactionJob::Run():Start");
+
+  // 预测下一轮compaction可能会包含的文件
+  PredictNextCompactionFiles();
+
   log_buffer_->FlushBufferToLog();
   LogCompaction();
 
@@ -911,9 +957,43 @@ Status CompactionJob::Run() {
   RecordCompactionIOStats();
   LogFlush(db_options_.info_log);
   TEST_SYNC_POINT("CompactionJob::Run():End");
+  
+  // 更新CompactionPredictor的预测集合，移除已经compaction的文件
+  UpdateCompactionPrediction();
+  
   compact_->status = status;
   TEST_SYNC_POINT_CALLBACK("CompactionJob::Run():EndStatusSet", &status);
   return status;
+}
+
+void CompactionJob::UpdateCompactionPrediction() {
+  // 收集本次compaction处理的所有文件
+  std::set<std::string> compacted_files;
+  auto* compaction = compact_->compaction;
+  
+  if (!compaction) {
+    return;
+  }
+  
+  // 获取每个输入层的所有文件
+  for (size_t i = 0; i < compaction->num_input_levels(); ++i) {
+    for (const auto& file_meta : *(compaction->inputs(i))) {
+      compacted_files.insert(std::to_string(file_meta->fd.GetNumber()));
+    }
+  }
+  
+  // 记录日志，显示已经完成compaction的文件
+  if (!compacted_files.empty()) {
+    ROCKS_LOG_INFO(db_options_.info_log,
+                 "[%s] 已完成compaction的文件: %s",
+                 compaction->column_family_data()->GetName().c_str(),
+                 std::accumulate(
+                     std::next(compacted_files.begin()), compacted_files.end(),
+                     *compacted_files.begin(),
+                     [](const std::string& a, const std::string& b) {
+                       return a + ", " + b;
+                     }).c_str());
+  }
 }
 
 Status CompactionJob::Install(bool* compaction_released) {
