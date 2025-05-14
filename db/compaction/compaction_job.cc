@@ -217,10 +217,51 @@ void CompactionJob::PredictNextCompactionFiles() {
     return;
   }
   
+  auto* compaction = compact_->compaction;
+  // 记录当前正在进行的compaction信息，方便对比
+  ROCKS_LOG_INFO(db_options_.info_log,
+               "[%s] 当前进行的compaction: 从Level %d 到 Level %d, 原因: %d",
+               compaction->column_family_data()->GetName().c_str(),
+               compaction->start_level(),
+               compaction->output_level(),
+               static_cast<int>(compaction->compaction_reason()));
+  
+  // 记录当前compaction涉及的文件
+  for (size_t i = 0; i < compaction->num_input_levels(); i++) {
+    const auto& input_files = *(compaction->inputs(i));
+    if (!input_files.empty()) {
+      std::string files_str;
+      for (size_t j = 0; j < input_files.size(); j++) {
+        if (j > 0) {
+          files_str += ", ";
+        }
+        files_str += std::to_string(input_files[j]->fd.GetNumber());
+      }
+      ROCKS_LOG_INFO(db_options_.info_log,
+                   "[%s] 当前compaction Level %d 文件: %s",
+                   compaction->column_family_data()->GetName().c_str(),
+                   compaction->level(i),
+                   files_str.c_str());
+    }
+  }
+  
   // 获取VersionStorageInfo对象
-  const VersionStorageInfo* vstorage = compact_->compaction->input_version()->storage_info();
+  const VersionStorageInfo* vstorage = compaction->input_version()->storage_info();
   if (vstorage == nullptr) {
     return;
+  }
+  
+  // 记录当前各层Score，帮助理解为什么会选择哪些层级进行compaction
+  for (int level = 0; level < vstorage->num_levels() - 1; level++) {
+    double score = vstorage->CompactionScore(level);
+    int files_count = vstorage->NumLevelFiles(level);
+    uint64_t level_size = vstorage->NumLevelBytes(level);
+    
+    ROCKS_LOG_INFO(db_options_.info_log,
+                 "[%s] Level %d 的compaction score: %.2f, 文件数: %d, 总大小: %llu bytes",
+                 compaction->column_family_data()->GetName().c_str(),
+                 level, score, files_count, 
+                 static_cast<unsigned long long>(level_size));
   }
   
   // 创建CompactionPredictor对象
@@ -231,15 +272,70 @@ void CompactionJob::PredictNextCompactionFiles() {
   
   // 记录预测的文件
   if (!predicted_files.empty()) {
+    // 收集预测文件的详细信息
+    std::map<int, std::vector<std::string>> files_by_level;
+    std::map<std::string, std::pair<std::string, std::string>> file_key_ranges;
+    
+    // 按层级收集文件信息
+    for (const auto& file_num_str : predicted_files) {
+      uint64_t file_num = std::stoull(file_num_str);
+      // 查找该文件所在的层级
+      for (int level = 0; level < vstorage->num_levels(); level++) {
+        bool found = false;
+        for (const auto* file : vstorage->LevelFiles(level)) {
+          if (file->fd.GetNumber() == file_num) {
+            files_by_level[level].push_back(file_num_str);
+            // 记录文件的键范围
+            file_key_ranges[file_num_str] = {
+              file->smallest.DebugString(true),
+              file->largest.DebugString(true)
+            };
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+    }
+    
+    // 输出总预测信息
     ROCKS_LOG_INFO(db_options_.info_log,
-                   "[%s] 预测下次compaction可能会包含的文件: %s",
-                   compact_->compaction->column_family_data()->GetName().c_str(),
-                   std::accumulate(
-                       std::next(predicted_files.begin()), predicted_files.end(),
-                       *predicted_files.begin(),
-                       [](const std::string& a, const std::string& b) {
-                         return a + ", " + b;
-                       }).c_str());
+                 "[%s] 预测下次compaction可能会包含 %zu 个文件",
+                 compaction->column_family_data()->GetName().c_str(),
+                 predicted_files.size());
+    
+    // 输出按层级分组的预测文件
+    for (const auto& level_files : files_by_level) {
+      int level = level_files.first;
+      const auto& files = level_files.second;
+      
+      std::string files_str;
+      for (size_t i = 0; i < files.size(); i++) {
+        if (i > 0) {
+          files_str += ", ";
+        }
+        files_str += files[i];
+      }
+      
+      ROCKS_LOG_INFO(db_options_.info_log,
+                   "[%s] 预测的Level %d 文件 (%zu个): %s",
+                   compaction->column_family_data()->GetName().c_str(),
+                   level, files.size(), files_str.c_str());
+    }
+    
+    // 输出每个文件的键范围信息
+    for (const auto& file_range : file_key_ranges) {
+      ROCKS_LOG_INFO(db_options_.info_log,
+                   "[%s] 预测文件 %s 的键范围: [%s, %s]",
+                   compaction->column_family_data()->GetName().c_str(),
+                   file_range.first.c_str(),
+                   file_range.second.first.c_str(),
+                   file_range.second.second.c_str());
+    }
+  } else {
+    ROCKS_LOG_INFO(db_options_.info_log,
+                 "[%s] 未能预测到下一轮compaction的文件",
+                 compaction->column_family_data()->GetName().c_str());
   }
 }
 

@@ -163,83 +163,154 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
   // 使用VersionStorageInfo的NextCompactionIndex来找出最可能进行compaction的文件
   // 这与CompactionPicker的选择逻辑一致，提高预测准确率
   size_t start_index = 0;
-  // 如果level > 0，尝试使用VersionStorageInfo的NextCompactionIndex
-  if (level > 0) {
-    start_index = vstorage_->NextCompactionIndex(level);
-    if (start_index >= level_files.size()) {
-      start_index = 0; // 防止索引越界
-    }
+  
+  // 获取文件得分列表
+  const std::vector<int>& file_scores = vstorage_->FilesByCompactionPri(level);
+  if (file_scores.empty()) {
+    ROCKS_LOG_INFO(nullptr, "Level %d 没有按压缩优先级排序的文件", level);
+    return files;
   }
   
-  // 使用找到的起点文件
-  const FileMetaData* start_file = level_files[start_index];
-  std::string start_file_number = std::to_string(start_file->fd.GetNumber());
-  files.insert(start_file_number);
+  // 根据CompactionPicker的逻辑选择起始文件
+  unsigned int cmp_idx = vstorage_->NextCompactionIndex(level);
+  ROCKS_LOG_INFO(nullptr, "Level %d 的当前NextCompactionIndex: %u", level, cmp_idx);
   
-  ROCKS_LOG_INFO(nullptr, "Level %d 选择文件 %s 作为预测起点，键范围: [%s, %s]", 
-                level, start_file_number.c_str(),
-                start_file->smallest.DebugString(true).c_str(),
-                start_file->largest.DebugString(true).c_str());
-  
-  // 找到所有在相同层里键范围重叠的文件
-  for (size_t i = 0; i < level_files.size(); i++) {
-    if (i == start_index) continue;  // 跳过起点文件自身
-    
-    const FileMetaData* other_file = level_files[i];
-    std::string other_file_number = std::to_string(other_file->fd.GetNumber());
-    
-    // 检查文件与起点文件是否有重叠
-    if (start_file->smallest.user_key().compare(other_file->largest.user_key()) > 0 ||
-        start_file->largest.user_key().compare(other_file->smallest.user_key()) < 0) {
-      continue;  // 文件没有重叠，跳过
-    }
-    
-    // 文件有重叠，添加到集合中
-    files.insert(other_file_number);
-    ROCKS_LOG_INFO(nullptr, "Level %d 文件 %s 与起点文件键范围重叠，添加到预测集合", 
-                  level, other_file_number.c_str());
+  // 如果已经到达文件列表末尾，重置到开始位置
+  if (cmp_idx >= file_scores.size()) {
+    cmp_idx = 0;
+    ROCKS_LOG_INFO(nullptr, "NextCompactionIndex已到达末尾，重置为0");
   }
   
-  // 找到下层与该文件键范围重叠的文件
-  if (level + 1 < vstorage_->num_levels()) {
-    const Slice& smallest_key = start_file->smallest.user_key();
-    const Slice& largest_key = start_file->largest.user_key();
+  // 寻找合适的起始文件
+  bool found_start_file = false;
+  size_t checked_files = 0;
+  while (checked_files < file_scores.size() && !found_start_file) {
+    // 索引可能超出范围，需要保护
+    if (cmp_idx >= file_scores.size()) {
+      cmp_idx = 0;
+    }
     
-    // 检查下层是否有重叠的文件
-    const auto& next_level_files = vstorage_->LevelFiles(level + 1);
-    ROCKS_LOG_INFO(nullptr, "检查Level %d 的 %zu 个文件是否与键范围重叠", 
-                  level + 1, next_level_files.size());
+    int index = file_scores[cmp_idx];
+    if (index >= static_cast<int>(level_files.size())) {
+      ROCKS_LOG_WARN(nullptr, "文件索引 %d 超出范围 (文件数: %zu)", 
+                     index, level_files.size());
+      cmp_idx = (cmp_idx + 1) % file_scores.size();
+      checked_files++;
+      continue;
+    }
     
-    int overlap_count = 0;
-    for (const auto& file : next_level_files) {
-      // 检查文件是否与键范围重叠
-      const Slice& file_smallest = file->smallest.user_key();
-      const Slice& file_largest = file->largest.user_key();
+    auto* f = level_files[index];
+    
+    // 模拟CompactionPicker::PickFileToCompact逻辑
+    // 不选择正在压缩的文件
+    if (f->being_compacted) {
+      ROCKS_LOG_INFO(nullptr, "Level %d 文件 %llu 正在被压缩，跳过", 
+                    level, static_cast<unsigned long long>(f->fd.GetNumber()));
+      cmp_idx = (cmp_idx + 1) % file_scores.size();
+      checked_files++;
+      continue;
+    }
+    
+    // 找到了起始文件
+    start_index = index;
+    found_start_file = true;
+    
+    // 使用找到的起点文件
+    const FileMetaData* start_file = level_files[start_index];
+    std::string start_file_number = std::to_string(start_file->fd.GetNumber());
+    files.insert(start_file_number);
+    
+    ROCKS_LOG_INFO(nullptr, "Level %d 选择文件 %s (#%zu) 作为预测起点，键范围: [%s, %s], 文件大小: %llu bytes", 
+                  level, start_file_number.c_str(), start_index,
+                  start_file->smallest.DebugString(true).c_str(),
+                  start_file->largest.DebugString(true).c_str(),
+                  static_cast<unsigned long long>(start_file->fd.GetFileSize()));
+    
+    // 扩展到clean cut边界 - 像ExpandInputsToCleanCut一样的逻辑
+    // 找到所有在相同层里键范围重叠的文件
+    InternalKey smallest = start_file->smallest;
+    InternalKey largest = start_file->largest;
+    
+    // 寻找clean cut边界内的所有文件
+    for (size_t i = 0; i < level_files.size(); i++) {
+      if (i == start_index) continue;  // 跳过起点文件自身
       
-      if (!(smallest_key.compare(file_largest) > 0 ||
-            largest_key.compare(file_smallest) < 0)) {
-        // 文件与键范围重叠，添加到集合中
-        std::string file_number = std::to_string(file->fd.GetNumber());
-        files.insert(file_number);
-        overlap_count++;
-        ROCKS_LOG_INFO(nullptr, "Level %d 文件 %s 与上层键范围重叠，添加到预测集合", 
-                      level + 1, file_number.c_str());
+      const FileMetaData* other_file = level_files[i];
+      std::string other_file_number = std::to_string(other_file->fd.GetNumber());
+      
+      // 如果该文件正在被压缩，跳过
+      if (other_file->being_compacted) {
+        ROCKS_LOG_INFO(nullptr, "Level %d 文件 %s 正在被压缩，跳过考虑重叠", 
+                      level, other_file_number.c_str());
+        continue;
+      }
+      
+      // 检查文件是否在当前的键范围内
+      if (!(other_file->largest.user_key().compare(smallest.user_key()) < 0 ||
+            other_file->smallest.user_key().compare(largest.user_key()) > 0)) {
+        // 文件有重叠，添加到集合中并扩展键范围
+        files.insert(other_file_number);
+        
+        // 更新键范围
+        if (other_file->smallest.user_key().compare(smallest.user_key()) < 0) {
+          smallest = other_file->smallest;
+        }
+        if (other_file->largest.user_key().compare(largest.user_key()) > 0) {
+          largest = other_file->largest;
+        }
+        
+        ROCKS_LOG_INFO(nullptr, "Level %d 文件 %s 与键范围重叠，添加到预测集合，扩展键范围至 [%s, %s]", 
+                      level, other_file_number.c_str(),
+                      smallest.DebugString(true).c_str(),
+                      largest.DebugString(true).c_str());
       }
     }
     
-    if (overlap_count == 0) {
-      ROCKS_LOG_INFO(nullptr, "Level %d 未找到与上层键范围重叠的文件", level + 1);
-      // 如果预测没有找到下层重叠文件，可能是预测逻辑与实际compaction逻辑不同
-      // 这种情况下，将整个层级的文件都加入预测集合
-      ROCKS_LOG_INFO(nullptr, "预测失败，将Level %d 的所有 %zu 个文件加入预测集合", 
-                    level, level_files.size());
-      for (const auto& file : level_files) {
-        std::string file_number = std::to_string(file->fd.GetNumber());
-        files.insert(file_number);
+    // 找到下层与该文件键范围重叠的文件
+    if (level + 1 < vstorage_->num_levels()) {
+      // 使用扩展后的键范围查找下一层重叠文件
+      const auto& next_level_files = vstorage_->LevelFiles(level + 1);
+      ROCKS_LOG_INFO(nullptr, "检查Level %d 的 %zu 个文件是否与键范围 [%s, %s] 重叠", 
+                    level + 1, next_level_files.size(),
+                    smallest.DebugString(true).c_str(),
+                    largest.DebugString(true).c_str());
+      
+      int overlap_count = 0;
+      for (const auto& file : next_level_files) {
+        // 如果该文件正在被压缩，跳过
+        if (file->being_compacted) {
+          ROCKS_LOG_INFO(nullptr, "Level %d 文件 %llu 正在被压缩，跳过考虑重叠", 
+                        level + 1, static_cast<unsigned long long>(file->fd.GetNumber()));
+          continue;
+        }
+        
+        // 检查文件是否与键范围重叠
+        if (!(file->largest.user_key().compare(smallest.user_key()) < 0 ||
+              file->smallest.user_key().compare(largest.user_key()) > 0)) {
+          // 文件与键范围重叠，添加到集合中
+          std::string file_number = std::to_string(file->fd.GetNumber());
+          files.insert(file_number);
+          overlap_count++;
+          ROCKS_LOG_INFO(nullptr, "Level %d 文件 %s 与上层键范围重叠，添加到预测集合, 键范围: [%s, %s]", 
+                        level + 1, file_number.c_str(),
+                        file->smallest.DebugString(true).c_str(),
+                        file->largest.DebugString(true).c_str());
+        }
+      }
+      
+      if (overlap_count == 0) {
+        ROCKS_LOG_INFO(nullptr, "Level %d 未找到与上层键范围重叠的文件", level + 1);
       }
     }
   }
   
+  if (!found_start_file) {
+    ROCKS_LOG_INFO(nullptr, "Level %d 未找到合适的起始文件进行预测", level);
+    // 如果所有文件都不合适（可能都在压缩中），返回空集合
+    return files;
+  }
+  
+  ROCKS_LOG_INFO(nullptr, "Level %d 总共预测到 %zu 个文件参与compaction", level, files.size());
   return files;
 }
 
