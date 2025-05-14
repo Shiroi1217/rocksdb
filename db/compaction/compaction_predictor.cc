@@ -16,13 +16,11 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
   if (vstorage_->CompactionScore(0) > 1.0) {
     // L0层不进行预测，因为L0层的文件选择逻辑较为特殊，预测准确率低
     ROCKS_LOG_INFO(nullptr, "跳过L0层预测，因为L0层文件选择逻辑特殊");
-    
-    // 仅返回空集合，不对L0进行预测
-    return current_predicted;
+    // 注意：不再直接返回，继续检查其他层级
   }
   
   // 检查所有层级的score，找出score > 1的层级
-  for (int level = 0; level < vstorage_->num_levels() - 1; level++) {
+  for (int level = 1; level < vstorage_->num_levels() - 1; level++) {
     if (!CheckLevelScore(level)) continue;
     
     // 对于score > 1的层级，获取可能进行compaction的文件
@@ -92,7 +90,7 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
   }
   
   // 检查可能的跨层compaction（例如当前层score不大于1但上层score大于1）
-  for (int level = 0; level < vstorage_->num_levels() - 2; level++) {
+  for (int level = 1; level < vstorage_->num_levels() - 2; level++) {
     if (CheckLevelScore(level)) continue; // 已经处理过
     
     // 检查上层是否有score>1且中间层score>0.8
