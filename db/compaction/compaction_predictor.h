@@ -3,6 +3,7 @@
 
 #include <set>
 #include <string>
+#include <map>
 #include "db/version_set.h"
 
 namespace ROCKSDB_NAMESPACE {
@@ -10,13 +11,16 @@ namespace ROCKSDB_NAMESPACE {
 class CompactionPredictor {
 public:
   explicit CompactionPredictor(const VersionStorageInfo* vstorage) 
-    : vstorage_(vstorage) {}
+    : vstorage_(vstorage), predicted_files_(), incorrect_predicted_files_() {}
   
   // 预测下一轮compaction会包含哪些文件
   std::set<std::string> PredictCompactionFiles();
 
   // 获取指定层级可能进行compaction的文件
   std::set<std::string> GetLevelCompactionFiles(int level);
+
+  // 获取下一批可能进行compaction的文件，排除已经预测过的文件
+  std::set<std::string> GetNextCompactionFilesFrom(int level, const std::set<std::string>& excluded_files);
 
   // 检查该层级的score是否大于1
   bool CheckLevelScore(int level) {
@@ -49,11 +53,16 @@ public:
   
   // 从预测集合中删除已经被compaction的文件
   void RemoveCompactedFiles(const std::set<std::string>& compacted_files);
+  
+  // 从预测集合中删除预测错误的文件
+  void RemoveIncorrectPredictedFiles(const std::set<std::string>& incorrect_files);
 
 private:
   const VersionStorageInfo* vstorage_;
-  // 保存当前预测的文件集合
-  std::set<std::string> predicted_files_;
+  // 保存当前预测的文件集合及其出现次数
+  std::map<std::string, int> predicted_files_;
+  // 保存预测错误的文件集合
+  std::set<std::string> incorrect_predicted_files_;
 };
 
 } // namespace ROCKSDB_NAMESPACE

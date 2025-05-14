@@ -8,14 +8,15 @@ namespace ROCKSDB_NAMESPACE {
 //     : vstorage_(vstorage) {}
 
 std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
-  predicted_files_.clear();
+  // 不再清空predicted_files_集合，改为创建当前轮次的预测结果集合
+  std::set<std::string> current_predicted;
   
   // 特殊处理L0层
   if (vstorage_->CompactionScore(0) > 1.0) {
     // 当L0层的score > 1时，所有L0层的文件都可能进行compaction
     const auto& level_files = vstorage_->LevelFiles(0);
     for (const auto& file : level_files) {
-      predicted_files_.insert(std::to_string(file->fd.GetNumber()));
+      current_predicted.insert(std::to_string(file->fd.GetNumber()));
     }
     
     // 可能的话，找出L1层可能会与L0文件重叠的文件
@@ -34,50 +35,114 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
         }
         
         if (has_overlap) {
-          predicted_files_.insert(std::to_string(l1_file->fd.GetNumber()));
+          current_predicted.insert(std::to_string(l1_file->fd.GetNumber()));
         }
       }
     }
     
-    return predicted_files_;
-  }
-  
-  // 从L1开始遍历到最大层
-  for (int level = 1; level < vstorage_->num_levels(); ++level) {
-    // 检查当前层score是否>1
-    if (CheckLevelScore(level)) {
-      auto level_files = GetLevelCompactionFiles(level);
-      predicted_files_.insert(level_files.begin(), level_files.end());
-      continue;
+    // 更新预测文件的计数
+    for (const auto& file : current_predicted) {
+      predicted_files_[file]++;
     }
     
-    // 检查上层是否有score>1且中间层score>0.8
-    for (int upper_level = level + 1; upper_level < vstorage_->num_levels(); ++upper_level) {
-      if (CheckLevelScore(upper_level) && CheckIntermediateLevelsBetween(upper_level, level)) {
-        auto level_files = GetLevelCompactionFiles(level);
-        predicted_files_.insert(level_files.begin(), level_files.end());
-        break;
+    // 将出现次数超过3次的文件从集合中删除
+    for (auto it = predicted_files_.begin(); it != predicted_files_.end(); ) {
+      if (it->second > 3) {
+        it = predicted_files_.erase(it);
+      } else {
+        ++it;
       }
     }
     
+    return current_predicted;
+  }
+  
+  // 检查所有层级的score，找出score > 1的层级
+  for (int level = 0; level < vstorage_->num_levels() - 1; level++) {
+    if (!CheckLevelScore(level)) continue;
+    
+    // 对于score > 1的层级，获取可能进行compaction的文件
+    auto level_files = GetLevelCompactionFiles(level);
+    
+    // 移除已知错误预测的文件
+    std::set<std::string> filtered_files;
+    for (const auto& file : level_files) {
+      if (incorrect_predicted_files_.find(file) == incorrect_predicted_files_.end()) {
+        filtered_files.insert(file);
+      }
+    }
+    
+    // 将该层级的文件添加到当前预测集合中
+    current_predicted.insert(filtered_files.begin(), filtered_files.end());
+    
     // 计算新的score并检查是否需要继续compaction
-    double new_score = CalculateNewScore(level, predicted_files_);
+    double new_score = CalculateNewScore(level, current_predicted);
     if (new_score > 1.0) {
       // The score is still > 1.0 after removing the files that are already
       // predicted to be compacted. We need to predict more files.
       
+      // 尝试找其他可能的起点进行预测
+      std::set<std::string> already_predicted;
+      for (const auto& file : current_predicted) {
+        already_predicted.insert(file);
+      }
+      
       // 最多重复三次
-      for (int i = 0; i < 3; ++i) {
-        auto additional_files = GetLevelCompactionFiles(level);
-        predicted_files_.insert(additional_files.begin(), additional_files.end());
+      for (int i = 0; i < 3 && new_score > 1.0; ++i) {
+        // 寻找未被预测过的、最适合作为起点的文件
+        auto additional_files = GetNextCompactionFilesFrom(level, already_predicted);
+        if (additional_files.empty()) {
+          break;  // 没有更多适合的文件了
+        }
         
-        new_score = CalculateNewScore(level, predicted_files_);
-        if (new_score <= 1.0) break;
+        current_predicted.insert(additional_files.begin(), additional_files.end());
+        for (const auto& file : additional_files) {
+          already_predicted.insert(file);
+        }
+        
+        new_score = CalculateNewScore(level, current_predicted);
       }
     }
   }
   
-  return predicted_files_;
+  // 检查可能的跨层compaction（例如当前层score不大于1但上层score大于1）
+  for (int level = 0; level < vstorage_->num_levels() - 2; level++) {
+    if (CheckLevelScore(level)) continue; // 已经处理过
+    
+    // 检查上层是否有score>1且中间层score>0.8
+    for (int upper_level = level + 1; upper_level < vstorage_->num_levels() - 1; upper_level++) {
+      if (CheckLevelScore(upper_level) && CheckIntermediateLevelsBetween(upper_level, level)) {
+        auto level_files = GetLevelCompactionFiles(level);
+        
+        // 移除已知错误预测的文件
+        std::set<std::string> filtered_files;
+        for (const auto& file : level_files) {
+          if (incorrect_predicted_files_.find(file) == incorrect_predicted_files_.end()) {
+            filtered_files.insert(file);
+          }
+        }
+        
+        current_predicted.insert(filtered_files.begin(), filtered_files.end());
+        break;
+      }
+    }
+  }
+  
+  // 更新预测文件的计数
+  for (const auto& file : current_predicted) {
+    predicted_files_[file]++;
+  }
+  
+  // 将出现次数超过3次的文件从集合中删除
+  for (auto it = predicted_files_.begin(); it != predicted_files_.end(); ) {
+    if (it->second > 3) {
+      it = predicted_files_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  
+  return current_predicted;
 }
 
 // CheckLevelScore已在头文件中定义为内联函数，无需重复定义
@@ -96,46 +161,52 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
   std::set<std::string> files;
   const auto& level_files = vstorage_->LevelFiles(level);
   
-  // 获取compaction指针指向的文件
-  if (!level_files.empty()) {
-    uint64_t file_number = level_files[0]->fd.GetNumber();
-    files.insert(std::to_string(file_number));
+  if (level_files.empty()) {
+    return files;
+  }
+  
+  // 由于VersionStorageInfo没有GetCompactionPointer方法，我们直接选择一个起点文件
+  // 如果将来需要获取compaction_pointer，可以通过扩展VersionStorageInfo类添加该方法
+  size_t start_index = 0;
+  
+  // 使用找到的起点文件
+  const FileMetaData* start_file = level_files[start_index];
+  files.insert(std::to_string(start_file->fd.GetNumber()));
+  
+  // 找到所有在相同层里键范围重叠的文件
+  for (size_t i = 0; i < level_files.size(); i++) {
+    if (i == start_index) continue;  // 跳过起点文件自身
     
-    // 找到所有在相同层里键范围重叠的文件
-    for (size_t i = 1; i < level_files.size(); i++) {
-      // 检查文件与第一个文件是否有键范围重叠
-      const FileMetaData* f1 = level_files[0];
-      const FileMetaData* f2 = level_files[i];
-      
-      // 检查f1和f2是否有重叠
-      if (f1->smallest.user_key().compare(f2->largest.user_key()) > 0 ||
-          f1->largest.user_key().compare(f2->smallest.user_key()) < 0) {
-        continue;  // 文件没有重叠，跳过
-      }
-      
-      // 文件有重叠，添加到集合中
-      uint64_t overlap_file_number = level_files[i]->fd.GetNumber();
-      files.insert(std::to_string(overlap_file_number));
+    const FileMetaData* other_file = level_files[i];
+    
+    // 检查文件与起点文件是否有重叠
+    if (start_file->smallest.user_key().compare(other_file->largest.user_key()) > 0 ||
+        start_file->largest.user_key().compare(other_file->smallest.user_key()) < 0) {
+      continue;  // 文件没有重叠，跳过
     }
     
-    // 找到下层与该文件键范围重叠的文件
-    if (level + 1 < vstorage_->num_levels()) {
-      const Slice& smallest_key = level_files[0]->smallest.user_key();
-      const Slice& largest_key = level_files[0]->largest.user_key();
+    // 文件有重叠，添加到集合中
+    uint64_t overlap_file_number = other_file->fd.GetNumber();
+    files.insert(std::to_string(overlap_file_number));
+  }
+  
+  // 找到下层与该文件键范围重叠的文件
+  if (level + 1 < vstorage_->num_levels()) {
+    const Slice& smallest_key = start_file->smallest.user_key();
+    const Slice& largest_key = start_file->largest.user_key();
+    
+    // 检查下层是否有重叠的文件
+    const auto& next_level_files = vstorage_->LevelFiles(level + 1);
+    for (const auto& file : next_level_files) {
+      // 检查文件是否与键范围重叠
+      const Slice& file_smallest = file->smallest.user_key();
+      const Slice& file_largest = file->largest.user_key();
       
-      // 检查下层是否有重叠的文件
-      const auto& next_level_files = vstorage_->LevelFiles(level + 1);
-      for (const auto& file : next_level_files) {
-        // 检查文件是否与键范围重叠
-        const Slice& file_smallest = file->smallest.user_key();
-        const Slice& file_largest = file->largest.user_key();
-        
-        if (!(smallest_key.compare(file_largest) > 0 ||
-              largest_key.compare(file_smallest) < 0)) {
-          // 文件与键范围重叠，添加到集合中
-          uint64_t overlap_file_number = file->fd.GetNumber();
-          files.insert(std::to_string(overlap_file_number));
-        }
+      if (!(smallest_key.compare(file_largest) > 0 ||
+            largest_key.compare(file_smallest) < 0)) {
+        // 文件与键范围重叠，添加到集合中
+        uint64_t overlap_file_number = file->fd.GetNumber();
+        files.insert(std::to_string(overlap_file_number));
       }
     }
   }
@@ -211,6 +282,92 @@ void CompactionPredictor::RemoveCompactedFiles(const std::set<std::string>& comp
   for (const auto& file : compacted_files) {
     predicted_files_.erase(file);
   }
+}
+
+std::set<std::string> CompactionPredictor::GetNextCompactionFilesFrom(
+    int level, const std::set<std::string>& excluded_files) {
+  std::set<std::string> files;
+  const auto& level_files = vstorage_->LevelFiles(level);
+  
+  if (level_files.empty()) {
+    return files;
+  }
+  
+  // 寻找未被排除的文件且不是已知错误预测的文件作为新的起点
+  const FileMetaData* start_file = nullptr;
+  for (const auto& file : level_files) {
+    std::string file_number = std::to_string(file->fd.GetNumber());
+    if (excluded_files.find(file_number) == excluded_files.end() && 
+        incorrect_predicted_files_.find(file_number) == incorrect_predicted_files_.end()) {
+      start_file = file;
+      files.insert(file_number);
+      break;
+    }
+  }
+  
+  if (start_file == nullptr) {
+    // 没有找到合适的起点文件
+    return files;
+  }
+  
+  // 找到所有在相同层里键范围重叠的文件
+  for (const auto& file : level_files) {
+    if (file == start_file) continue;  // 跳过起点文件自身
+    
+    std::string file_number = std::to_string(file->fd.GetNumber());
+    if (excluded_files.find(file_number) != excluded_files.end() ||
+        incorrect_predicted_files_.find(file_number) != incorrect_predicted_files_.end()) {
+      continue;  // 已被排除或已知错误预测，跳过
+    }
+    
+    // 检查文件与起点文件是否有重叠
+    if (start_file->smallest.user_key().compare(file->largest.user_key()) > 0 ||
+        start_file->largest.user_key().compare(file->smallest.user_key()) < 0) {
+      continue;  // 文件没有重叠，跳过
+    }
+    
+    // 文件有重叠，添加到集合中
+    files.insert(file_number);
+  }
+  
+  // 找到下层与该文件键范围重叠的文件
+  if (level + 1 < vstorage_->num_levels()) {
+    const Slice& smallest_key = start_file->smallest.user_key();
+    const Slice& largest_key = start_file->largest.user_key();
+    
+    // 检查下层是否有重叠的文件
+    const auto& next_level_files = vstorage_->LevelFiles(level + 1);
+    for (const auto& file : next_level_files) {
+      std::string file_number = std::to_string(file->fd.GetNumber());
+      if (excluded_files.find(file_number) != excluded_files.end() ||
+          incorrect_predicted_files_.find(file_number) != incorrect_predicted_files_.end()) {
+        continue;  // 已被排除或已知错误预测，跳过
+      }
+      
+      // 检查文件是否与键范围重叠
+      const Slice& file_smallest = file->smallest.user_key();
+      const Slice& file_largest = file->largest.user_key();
+      
+      if (!(smallest_key.compare(file_largest) > 0 ||
+            largest_key.compare(file_smallest) < 0)) {
+        // 文件与键范围重叠，添加到集合中
+        files.insert(file_number);
+      }
+    }
+  }
+  
+  return files;
+}
+
+void CompactionPredictor::RemoveIncorrectPredictedFiles(
+    const std::set<std::string>& incorrect_files) {
+  // 从预测集合中删除不正确的文件
+  for (const auto& file : incorrect_files) {
+    predicted_files_.erase(file);
+  }
+  
+  // 记录这些不正确的文件，以便以后的预测可以避免
+  incorrect_predicted_files_.insert(incorrect_files.begin(), incorrect_files.end());
 }
 
 } // namespace ROCKSDB_NAMESPACE
