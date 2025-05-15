@@ -63,6 +63,9 @@ public:
   
   // 从预测集合中删除预测错误的文件
   void RemoveIncorrectPredictedFiles(const std::set<std::string>& incorrect_files);
+  
+  // 检查是否可能发生L1到L2的compaction，尽管L1的score < 1.0
+  bool CheckL1ToL2Compaction();
 
 private:
   const VersionStorageInfo* vstorage_;
