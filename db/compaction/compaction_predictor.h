@@ -5,13 +5,25 @@
 #include <string>
 #include <map>
 #include "db/version_set.h"
+#include <vector>
 
 namespace ROCKSDB_NAMESPACE {
 
+// 预测即将到来的压缩中包含的文件
 class CompactionPredictor {
 public:
+  CompactionPredictor() : vstorage_(nullptr), immutable_options_(nullptr), mutable_cf_options_(nullptr) {}
+  
   explicit CompactionPredictor(const VersionStorageInfo* vstorage) 
-    : vstorage_(vstorage), predicted_files_() {}
+    : vstorage_(vstorage), predicted_files_(), immutable_options_(nullptr), mutable_cf_options_(nullptr) {}
+  
+  // 添加新的构造函数，接收options参数
+  CompactionPredictor(const VersionStorageInfo* vstorage, 
+                     const ImmutableOptions* immutable_options,
+                     const MutableCFOptions* mutable_cf_options)
+    : vstorage_(vstorage), predicted_files_(), 
+      immutable_options_(immutable_options), 
+      mutable_cf_options_(mutable_cf_options) {}
   
   // 预测下一轮compaction会包含哪些文件
   std::set<std::string> PredictCompactionFiles();
@@ -67,10 +79,28 @@ public:
   // 检查是否可能发生L1到L2的compaction，尽管L1的score < 1.0
   bool CheckL1ToL2Compaction();
 
+  // 获取预测的文件列表（用于兼容调用者）
+  std::vector<uint64_t> GetPredictedFiles() const {
+    std::vector<uint64_t> result;
+    for (const auto& pair : predicted_files_) {
+      // 尝试将文件名转换为数字
+      try {
+        uint64_t file_number = std::stoull(pair.first);
+        result.push_back(file_number);
+      } catch (const std::exception& e) {
+        // 忽略无法转换的文件名
+      }
+    }
+    return result;
+  }
+
 private:
   const VersionStorageInfo* vstorage_;
   // 保存当前预测的文件集合及其出现次数
   std::map<std::string, int> predicted_files_;
+  // 添加options成员变量
+  const ImmutableOptions* immutable_options_;
+  const MutableCFOptions* mutable_cf_options_;
 };
 
 } // namespace ROCKSDB_NAMESPACE

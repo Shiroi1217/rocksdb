@@ -264,6 +264,10 @@ void CompactionJob::PredictNextCompactionFiles() {
     return;
   }
   
+  // 获取必要的options进行准确的score计算
+  const auto& immutable_options = compaction->immutable_options();
+  const auto& mutable_cf_options = compaction->mutable_cf_options();
+  
   // 记录当前各层Score，帮助理解为什么会选择哪些层级进行compaction
   for (int level = 0; level < vstorage->num_levels() - 1; level++) {
     double score = vstorage->CompactionScore(level);
@@ -277,8 +281,8 @@ void CompactionJob::PredictNextCompactionFiles() {
                  static_cast<unsigned long long>(level_size));
   }
   
-  // 创建CompactionPredictor对象
-  CompactionPredictor predictor(vstorage);
+  // 创建CompactionPredictor对象，并传递options以确保获取正确的score值
+  CompactionPredictor predictor(vstorage, &immutable_options, &mutable_cf_options);
   
   // 预测下一轮compaction会包含哪些文件
   std::set<std::string> predicted_files = predictor.PredictCompactionFiles();

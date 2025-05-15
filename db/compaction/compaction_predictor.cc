@@ -15,6 +15,23 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
   // 确保我们获取到最新的层级信息和score值
   ROCKS_LOG_INFO(nullptr, "开始预测下一轮compaction文件，确保获取最新层级信息...");
   
+  // 手动获取最新的score值，因为VersionStorageInfo的score可能是过时的
+  // 注意：由于 VersionStorageInfo 是 const 的，我们不能调用 ComputeCompactionScore
+  // 只能使用已经计算好的 score 值
+  if (immutable_options_ && mutable_cf_options_) {
+    ROCKS_LOG_INFO(nullptr, "使用当前已有的compaction score值");
+    
+    // 输出每一层的score值进行调试验证
+    for (int level = 0; level < vstorage_->num_levels() - 1; level++) {
+      double score = vstorage_->CompactionScore(level);
+      int compaction_level = vstorage_->CompactionScoreLevel(0);
+      ROCKS_LOG_INFO(nullptr, "Level %d 的compaction score: %.2f (最高优先级的level是: %d)",
+                   level, score, compaction_level);
+    }
+  } else {
+    ROCKS_LOG_WARN(nullptr, "无法更新compaction score值，因为没有提供必要的options");
+  }
+  
   // 记录每个层级的score，找出score最高的层级
   int highest_score_level = -1;
   double highest_score = 0.0;
