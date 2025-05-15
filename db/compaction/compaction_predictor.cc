@@ -9,28 +9,43 @@ namespace ROCKSDB_NAMESPACE {
 //     : vstorage_(vstorage) {}
 
 std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
+  // 清空predicted_files_集合，存储本次预测结果
   std::set<std::string> current_predicted;
   
-  ROCKS_LOG_INFO(nullptr, "开始预测下一轮compaction文件...");
+  // 确保我们获取到最新的层级信息和score值
+  ROCKS_LOG_INFO(nullptr, "开始预测下一轮compaction文件，确保获取最新层级信息...");
   
-  // 遍历所有层级
-  for (int level = 0; level < vstorage_->num_levels() - 1; ++level) {
-    ROCKS_LOG_INFO(nullptr, "检查Level %d是否需要compaction，Score: %.2f", 
-                  level, vstorage_->CompactionScore(level));
+  // 检查所有层级的score，找出score > 1的层级
+  for (int level = 0; level < vstorage_->num_levels() - 1; level++) {
+    // 获取最新的compaction score
+    double score = vstorage_->CompactionScore(level);
+    ROCKS_LOG_INFO(nullptr, "Level %d 的compaction score: %.2f", level, score);
     
-    // 只处理得分大于1的层级
-    if (!CheckLevelScore(level)) {
-      continue;
-    }
+    if (score <= 1.0) continue;
     
-    // 对于L0->L1的特殊处理
+    ROCKS_LOG_INFO(nullptr, "Level %d 的score > 1.0，开始预测", level);
+    
+    // 特殊处理L0层
     if (level == 0) {
-      auto target_files = GetPossibleTargetFilesForL0Compaction();
-      if (!target_files.empty()) {
-        ROCKS_LOG_INFO(nullptr, "L0->L1 compaction预测涉及 %zu 个L1文件", target_files.size());
-        current_predicted.insert(target_files.begin(), target_files.end());
+      // 对于L0到L1的compaction，我们跳过预测L0层的文件，只预测L1层的文件
+      ROCKS_LOG_INFO(nullptr, "L0层特殊处理：跳过L0层文件预测，只预测目标L1层文件");
+      
+      // 只有当确实是L0到L1的score高于1时才进行处理
+      if (vstorage_->CompactionScore(0) > 1.0) {
+        // 获取L1层可能参与compaction的文件
+        auto l1_files = GetPossibleTargetFilesForL0Compaction();
+        
+        if (!l1_files.empty()) {
+          ROCKS_LOG_INFO(nullptr, "预测到L0到L1 compaction可能会影响 %zu 个L1文件", 
+                        l1_files.size());
+          
+          // 将所有L1文件添加到预测集合中
+          current_predicted.insert(l1_files.begin(), l1_files.end());
+        } else {
+          ROCKS_LOG_INFO(nullptr, "未找到可能受L0 compaction影响的L1文件");
+        }
       }
-      continue;
+      continue;  // L0层处理完毕，继续下一层
     }
     
     // 对于其他层级（L1及以上）
@@ -45,8 +60,7 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
     ROCKS_LOG_INFO(nullptr, "Level %d 预测到 %zu 个文件将进行compaction", 
                   level, level_files.size());
     
-    // 简化处理：不再过滤错误预测的文件
-    // 将该层级的文件直接添加到当前预测集合中
+    // 将该层级的文件添加到当前预测集合中
     current_predicted.insert(level_files.begin(), level_files.end());
     
     // 计算新的score并检查是否需要继续compaction
@@ -92,20 +106,24 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
         ROCKS_LOG_INFO(nullptr, "预测到Level %d 到 Level %d compaction会涉及 %zu 个Level %d文件", 
                      level, level + 1, target_level_files.size(), level + 1);
         
-        // 简化处理：直接添加到预测集合中，不再过滤
+        // 直接添加到预测集合中
         current_predicted.insert(target_level_files.begin(), target_level_files.end());
       }
     }
   }
   
-  // 更新预测次数，但不再标记错误预测
+  // 更新预测次数
   for (const auto& file : current_predicted) {
     predicted_files_[file]++;
     ROCKS_LOG_INFO(nullptr, "文件 %s 被预测次数: %d", 
                   file.c_str(), predicted_files_[file]);
   }
   
-  ROCKS_LOG_INFO(nullptr, "本轮预测完成，共预测到 %zu 个文件", current_predicted.size());
+  if (current_predicted.empty()) {
+    ROCKS_LOG_INFO(nullptr, "未能预测到下一轮compaction的文件");
+  } else {
+    ROCKS_LOG_INFO(nullptr, "本轮预测完成，共预测到 %zu 个文件", current_predicted.size());
+  }
   return current_predicted;
 }
 
