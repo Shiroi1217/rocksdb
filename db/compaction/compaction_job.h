@@ -229,6 +229,9 @@ class CompactionJob {
 
   CompactionJobStats* job_stats_;
 
+  // 用于跟踪是否已经执行过预测，避免重复预测
+  bool has_predicted_;
+
  private:
   friend class CompactionJobTestBase;
 

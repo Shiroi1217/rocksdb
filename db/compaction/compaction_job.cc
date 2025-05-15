@@ -209,6 +209,8 @@ CompactionJob::CompactionJob(
   ReportStartedCompaction(compaction);
   
   // 新增：创建预测器并预测即将进行compaction的文件
+  // 在构造函数中预测一次，避免重复预测
+  has_predicted_ = false;
   PredictNextCompactionFiles();
 }
 
@@ -216,6 +218,17 @@ void CompactionJob::PredictNextCompactionFiles() {
   if (compact_ == nullptr || compact_->compaction == nullptr) {
     return;
   }
+  
+  // 检查是否已经预测过，避免重复预测
+  if (has_predicted_) {
+    ROCKS_LOG_INFO(db_options_.info_log,
+                 "[%s] 跳过重复的compaction预测",
+                 compact_->compaction->column_family_data()->GetName().c_str());
+    return;
+  }
+  
+  // 标记已经预测过
+  has_predicted_ = true;
   
   auto* compaction = compact_->compaction;
   // 记录当前正在进行的compaction信息，方便对比
@@ -810,6 +823,7 @@ Status CompactionJob::Run() {
   TEST_SYNC_POINT("CompactionJob::Run():Start");
 
   // 预测下一轮compaction可能会包含的文件
+  // 如果在构造函数中已经预测过，这里不会重复预测
   PredictNextCompactionFiles();
 
   log_buffer_->FlushBufferToLog();
