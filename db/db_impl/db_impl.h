@@ -3160,8 +3160,6 @@ class DBImpl : public DB {
   // See also lock_wal_write_token_
   uint32_t lock_wal_count_ = 0;
 
-  // Predict the next compaction files for all column families
-  Status PredictNextCompactionFilesForAllCFs();
 };
 
 class GetWithTimestampReadCallback : public ReadCallback {

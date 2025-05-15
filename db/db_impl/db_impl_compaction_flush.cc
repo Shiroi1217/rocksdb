@@ -2928,10 +2928,6 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
                    &DBImpl::UnscheduleCompactionCallback);
   }
   
-  // Try to predict next compaction files for all CFs that have compaction scheduled
-  if (bg_compaction_scheduled_ > 0) {
-    PredictNextCompactionFilesForAllCFs();
-  }
 }
 
 DBImpl::BGJobLimits DBImpl::GetBGJobLimits() const {
@@ -4443,68 +4439,6 @@ Status DBImpl::WaitForCompact(
       return error_handler_.GetBGError();
     }
   }
-}
-
-Status DBImpl::PredictNextCompactionFilesForAllCFs() {
-  mutex_.AssertHeld();
-  Status s = Status::OK();
-  
-  for (auto cfd : *versions_->GetColumnFamilySet()) {
-    if (!cfd->IsDropped() && !cfd->queued_for_compaction() && !cfd->imm()->IsFlushPending()) {
-      // 获取最新的 SuperVersion
-      SuperVersion* sv = cfd->GetReferencedSuperVersion(this);
-      
-      if (sv && sv->current != nullptr) {
-        VersionStorageInfo* vstorage = sv->current->storage_info();
-        
-        if (vstorage != nullptr) {
-          // 获取必要的选项以确保正确的分数计算
-          const ImmutableOptions* ioptions = &cfd->ioptions();
-          const MutableCFOptions* moptions = &sv->mutable_cf_options;
-          
-          if (ioptions != nullptr && moptions != nullptr) {
-            // 重新计算压缩分数
-            vstorage->ComputeCompactionScore(*ioptions, *moptions);
-            
-            // 创建预测器实例
-            CompactionPredictor predictor(vstorage, ioptions, moptions);
-            
-            // 执行预测
-            auto predicted_files_set = predictor.PredictCompactionFiles();
-            
-            // 这里可以记录预测结果的日志
-            ROCKS_LOG_INFO(immutable_db_options_.info_log,
-                           "[%s] 预测下次压缩文件 - 预测了 %zu 个文件",
-                           cfd->GetName().c_str(),
-                           predicted_files_set.size());
-            
-            // 可以选择遍历预测的文件，记录详细信息
-            if (!predicted_files_set.empty()) {
-              std::string files_info;
-              for (const auto& file : predicted_files_set) {
-                if (!files_info.empty()) {
-                  files_info.append(", ");
-                }
-                files_info.append(file);
-              }
-              
-              ROCKS_LOG_INFO(immutable_db_options_.info_log,
-                             "[%s] 预测的文件: %s",
-                             cfd->GetName().c_str(),
-                             files_info.c_str());
-            }
-          }
-        }
-      }
-      
-      // 释放引用
-      if (sv) {
-        ReturnAndCleanupSuperVersion(cfd, sv);
-      }
-    }
-  }
-  
-  return s;
 }
 
 }  // namespace ROCKSDB_NAMESPACE
