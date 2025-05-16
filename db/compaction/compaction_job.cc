@@ -51,6 +51,7 @@
 #include "options/configurable_helper.h"
 #include "options/options_helper.h"
 #include "port/port.h"
+#include "port/port_posix.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
 #include "rocksdb/options.h"
@@ -215,144 +216,86 @@ CompactionJob::CompactionJob(
 }
 
 void CompactionJob::PredictNextCompactionFiles() {
-  if (compact_ == nullptr || compact_->compaction == nullptr) {
+  std::map<int, std::vector<FileMetaData*>> predictions;
+  // 避免重复预测
+  if (compact_ == nullptr || !predictions.empty()) {
+    ROCKS_LOG_INFO(db_options_.info_log, "PredictNextCompactionFiles: %s",
+                 compact_ == nullptr ? "compaction为空" : "预测已经完成，跳过");
     return;
   }
-  
-  // 检查是否已经预测过，避免重复预测
-  if (has_predicted_) {
-    ROCKS_LOG_INFO(db_options_.info_log,
-                 "[%s] 跳过重复的compaction预测",
-                 compact_->compaction->column_family_data()->GetName().c_str());
-    return;
-  }
-  
-  // 标记已经预测过
-  has_predicted_ = true;
-  
-  auto* compaction = compact_->compaction;
-  // 记录当前正在进行的compaction信息，方便对比
-  ROCKS_LOG_INFO(db_options_.info_log,
-               "[%s] 当前进行的compaction: 从Level %d 到 Level %d, 原因: %d",
-               compaction->column_family_data()->GetName().c_str(),
-               compaction->start_level(),
-               compaction->output_level(),
-               static_cast<int>(compaction->compaction_reason()));
-  
-  // 记录当前compaction涉及的文件
-  for (size_t i = 0; i < compaction->num_input_levels(); i++) {
-    const auto& input_files = *(compaction->inputs(i));
-    if (!input_files.empty()) {
-      std::string files_str;
-      for (size_t j = 0; j < input_files.size(); j++) {
-        if (j > 0) {
-          files_str += ", ";
-        }
-        files_str += std::to_string(input_files[j]->fd.GetNumber());
-      }
-      ROCKS_LOG_INFO(db_options_.info_log,
-                   "[%s] 当前compaction Level %d 文件: %s",
-                   compaction->column_family_data()->GetName().c_str(),
-                   compaction->level(i),
-                   files_str.c_str());
+
+  // 获取当前compaction信息
+  ROCKS_LOG_INFO(db_options_.info_log, "预测下一次compaction: 当前compaction为 L%d->L%d, 原因: %s",
+               compact_->compaction->start_level(), compact_->compaction->output_level(),
+               GetCompactionReasonString(compact_->compaction->compaction_reason()));
+
+  // 记录当前compaction的输入文件
+  ROCKS_LOG_INFO(db_options_.info_log, "当前compaction的输入文件:");
+  for (size_t which = 0; which < compact_->compaction->num_input_levels(); which++) {
+    for (const auto& file : *(compact_->compaction->inputs(which))) {
+      ROCKS_LOG_INFO(db_options_.info_log, "  [%d] 文件: %s [%s .. %s] (大小: %llu)",
+                   which == 0 ? compact_->compaction->start_level()
+                              : compact_->compaction->output_level(),
+                   std::to_string(file->fd.GetNumber()).c_str(),
+                   file->smallest.user_key().ToString(true).c_str(),
+                   file->largest.user_key().ToString(true).c_str(),
+                   static_cast<unsigned long long>(file->fd.file_size));
     }
   }
-  
-  // 获取VersionStorageInfo对象
-  const VersionStorageInfo* vstorage = compaction->input_version()->storage_info();
-  if (vstorage == nullptr) {
-    return;
-  }
-  
-  // 获取必要的options进行准确的score计算
-  const auto& immutable_options = compaction->immutable_options();
-  const auto& mutable_cf_options = compaction->mutable_cf_options();
-  
-  // 记录当前各层Score，帮助理解为什么会选择哪些层级进行compaction
+
+  auto vstorage = compact_->compaction->input_version()->storage_info();
+
+  // 输出各层级的分数
   for (int level = 0; level < vstorage->num_levels() - 1; level++) {
-    double score = vstorage->CompactionScore(level);
-    int files_count = vstorage->NumLevelFiles(level);
-    uint64_t level_size = vstorage->NumLevelBytes(level);
-    
-    ROCKS_LOG_INFO(db_options_.info_log,
-                 "[%s] Level %d 的compaction score: %.2f, 文件数: %d, 总大小: %llu bytes",
-                 compaction->column_family_data()->GetName().c_str(),
-                 level, score, files_count, 
-                 static_cast<unsigned long long>(level_size));
+    ROCKS_LOG_INFO(db_options_.info_log, "层级 %d 的compaction分数: %.2f", 
+                 level, vstorage->CompactionScore(level));
   }
-  
-  // 创建CompactionPredictor对象，并传递options以确保获取正确的score值
-  CompactionPredictor predictor(vstorage, &immutable_options, &mutable_cf_options);
-  
-  // 预测下一轮compaction会包含哪些文件
-  std::set<std::string> predicted_files = predictor.PredictCompactionFiles();
-  
-  // 记录预测的文件
-  if (!predicted_files.empty()) {
-    // 收集预测文件的详细信息
-    std::map<int, std::vector<std::string>> files_by_level;
-    std::map<std::string, std::pair<std::string, std::string>> file_key_ranges;
-    
-    // 按层级收集文件信息
-    for (const auto& file_num_str : predicted_files) {
-      uint64_t file_num = std::stoull(file_num_str);
-      // 查找该文件所在的层级
-      for (int level = 0; level < vstorage->num_levels(); level++) {
-        bool found = false;
-        for (const auto* file : vstorage->LevelFiles(level)) {
-          if (file->fd.GetNumber() == file_num) {
-            files_by_level[level].push_back(file_num_str);
-            // 记录文件的键范围
-            file_key_ranges[file_num_str] = {
-              file->smallest.DebugString(true),
-              file->largest.DebugString(true)
-            };
-            found = true;
-            break;
-          }
-        }
-        if (found) break;
+
+  // 使用CompactionPredictor预测下一次compaction
+  ROCKS_LOG_INFO(db_options_.info_log, "使用CompactionPredictor预测下一轮compaction");
+  CompactionPredictor predictor(vstorage, 
+                              &compact_->compaction->immutable_options(),
+                              &compact_->compaction->mutable_cf_options(),
+                              db_options_.info_log.get());
+  std::set<std::string> predicted_file_names = predictor.PredictCompactionFiles();
+
+  if (predicted_file_names.empty()) {
+    ROCKS_LOG_INFO(db_options_.info_log, "没有预测到下一轮的compaction文件");
+    return;
+  }
+
+  ROCKS_LOG_INFO(db_options_.info_log, "预测下一轮compaction将包含 %zu 个文件", 
+               predicted_file_names.size());
+
+  // 将预测的文件整理到对应层级
+  for (int level = 0; level < vstorage->num_levels(); level++) {
+    for (const auto& file : vstorage->LevelFiles(level)) {
+      if (predicted_file_names.find(std::to_string(file->fd.GetNumber())) != predicted_file_names.end()) {
+        predictions[level].push_back(file);
+        ROCKS_LOG_INFO(db_options_.info_log, "预测文件: L%d 文件 %s [%s .. %s] (大小: %llu)",
+                     level, std::to_string(file->fd.GetNumber()).c_str(),
+                     file->smallest.user_key().ToString(true).c_str(),
+                     file->largest.user_key().ToString(true).c_str(),
+                     static_cast<unsigned long long>(file->fd.file_size));
       }
     }
-    
-    // 输出总预测信息
-    ROCKS_LOG_INFO(db_options_.info_log,
-                 "[%s] 预测下次compaction可能会包含 %zu 个文件",
-                 compaction->column_family_data()->GetName().c_str(),
-                 predicted_files.size());
-    
-    // 输出按层级分组的预测文件
-    for (const auto& level_files : files_by_level) {
-      int level = level_files.first;
-      const auto& files = level_files.second;
-      
-      std::string files_str;
-      for (size_t i = 0; i < files.size(); i++) {
-        if (i > 0) {
-          files_str += ", ";
-        }
-        files_str += files[i];
+  }
+
+  // 输出预测后的层级分数
+  ROCKS_LOG_INFO(db_options_.info_log, "模拟compaction后的分数:");
+  for (int level = 0; level < vstorage->num_levels() - 1; level++) {
+    if (predictions.find(level) != predictions.end() && !predictions[level].empty()) {
+      std::set<std::string> level_files;
+      for (const auto& file : predictions[level]) {
+        level_files.insert(std::to_string(file->fd.GetNumber()));
       }
-      
-      ROCKS_LOG_INFO(db_options_.info_log,
-                   "[%s] 预测的Level %d 文件 (%zu个): %s",
-                   compaction->column_family_data()->GetName().c_str(),
-                   level, files.size(), files_str.c_str());
+      double new_score = predictor.CalculateNewScore(level, level_files);
+      ROCKS_LOG_INFO(db_options_.info_log, "层级 %d: 当前分数 %.2f -> 预测新分数 %.2f", 
+                   level, vstorage->CompactionScore(level), new_score);
+    } else {
+      ROCKS_LOG_INFO(db_options_.info_log, "层级 %d: 分数不变 %.2f", 
+                   level, vstorage->CompactionScore(level));
     }
-    
-    // 输出每个文件的键范围信息
-    for (const auto& file_range : file_key_ranges) {
-      ROCKS_LOG_INFO(db_options_.info_log,
-                   "[%s] 预测文件 %s 的键范围: [%s, %s]",
-                   compaction->column_family_data()->GetName().c_str(),
-                   file_range.first.c_str(),
-                   file_range.second.first.c_str(),
-                   file_range.second.second.c_str());
-    }
-  } else {
-    ROCKS_LOG_INFO(db_options_.info_log,
-                 "[%s] 未能预测到下一轮compaction的文件",
-                 compaction->column_family_data()->GetName().c_str());
   }
 }
 
