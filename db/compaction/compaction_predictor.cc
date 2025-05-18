@@ -27,20 +27,18 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
                        level, vstorage_->CompactionScore(level));
       }
     } else {
-      // 处理分数小于1但中间层分数都大于0.8的情况
-      if (level >= 1 && level < vstorage_->num_levels() - 1) {
-        if (vstorage_->CompactionScore(level - 1) > 1.0 && 
-            CheckIntermediateLevelsBetween(level - 1, level)) {
-          levels_to_check.push_back(level);
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "层级 %d 的分数为 %.2f <= 1.0，但上层分数 > 1.0 且中间层分数都 > 0.8，将进行预测", 
-                           level, vstorage_->CompactionScore(level));
-          }
-        } else if (level == 1 && CheckL1ToL2Compaction()) {
-          levels_to_check.push_back(level);
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "L1的分数为 %.2f <= 1.0，但可能进行L1到L2的compaction，将进行预测", 
-                           vstorage_->CompactionScore(level));
+      // 处理分数小于1但上层有score>1且中间层分数都大于0.8的情况
+      bool found = false;
+      for (int upper = 0; upper < level; ++upper) {
+        if (vstorage_->CompactionScore(upper) > 1.0) {
+          if (CheckIntermediateLevelsBetween(upper, level)) {
+            levels_to_check.push_back(level);
+            if (info_log_ != nullptr) {
+              ROCKS_LOG_INFO(info_log_, "层级 %d 的分数为 %.2f <= 1.0，但上层 %d 分数 > 1.0 且中间层分数都 > 0.8，将进行预测", 
+                             level, vstorage_->CompactionScore(level), upper);
+            }
+            found = true;
+            break;
           }
         }
       }
@@ -683,52 +681,6 @@ double CompactionPredictor::CalculateNewScore(int level, const std::set<std::str
   }
   
   return new_score;
-}
-
-// 检查是否可能发生L1到L2的compaction，尽管L1的score < 1.0
-bool CompactionPredictor::CheckL1ToL2Compaction() {
-  if (vstorage_->num_levels() <= 2) {
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "CheckL1ToL2Compaction: 层级数 <= 2，不检查L1到L2 compaction");
-    }
-    return false;
-  }
-  
-  double l1_score = vstorage_->CompactionScore(1);
-  if (l1_score >= 1.0) {
-    // 已经大于1了，不需要特殊检查
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "L1分数 %.2f >= 1.0，不需要特殊检查", l1_score);
-    }
-    return true;
-  }
-  
-  // 检查L1是否接近满并且L2的分数很高
-  double l2_score = vstorage_->CompactionScore(2);
-  if (l1_score > 0.8 && l2_score > 1.2) {
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "L1分数 %.2f > 0.8 且 L2分数 %.2f > 1.2，可能发生L1到L2 compaction", 
-                     l1_score, l2_score);
-    }
-    return true;
-  }
-  
-  // 检查L0的分数是否很高，可能会导致L1很快填满
-  double l0_score = vstorage_->CompactionScore(0);
-  if (l0_score > 1.5 && l1_score > 0.7) {
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "L0分数 %.2f > 1.5 且 L1分数 %.2f > 0.7，可能很快发生L1到L2 compaction", 
-                     l0_score, l1_score);
-    }
-    return true;
-  }
-  
-  if (info_log_ != nullptr) {
-    ROCKS_LOG_INFO(info_log_, "不满足L1到L2 compaction的条件: L0分数=%.2f, L1分数=%.2f, L2分数=%.2f", 
-                   l0_score, l1_score, l2_score);
-  }
-  
-  return false;
 }
 
 bool CompactionPredictor::KeysInRangeOverlapWithFile(int level, const Slice& smallest_key,
