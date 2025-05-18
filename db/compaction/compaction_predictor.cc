@@ -28,7 +28,6 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
       }
     } else {
       // 处理分数小于1但上层有score>1且中间层分数都大于0.8的情况
-      bool found = false;
       for (int upper = 0; upper < level; ++upper) {
         if (vstorage_->CompactionScore(upper) > 1.0) {
           if (CheckIntermediateLevelsBetween(upper, level)) {
@@ -37,7 +36,6 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
               ROCKS_LOG_INFO(info_log_, "层级 %d 的分数为 %.2f <= 1.0，但上层 %d 分数 > 1.0 且中间层分数都 > 0.8，将进行预测", 
                              level, vstorage_->CompactionScore(level), upper);
             }
-            found = true;
             break;
           }
         }
@@ -500,110 +498,40 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
   
   // 对于非L0层，通过compaction优先级获取文件
   int next_index = vstorage_->NextCompactionIndex(level);
-  if (next_index >= 0) {
-    // 找到下一个compaction索引
-    FileMetaData* start_file = vstorage_->LevelFiles(level)[next_index];
-    
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "层级 %d 的起始文件: %s，键范围: [%s, %s]", 
-                     level, 
-                     std::to_string(start_file->fd.GetNumber()).c_str(),
-                     start_file->smallest.user_key().ToString(true).c_str(),
-                     start_file->largest.user_key().ToString(true).c_str());
-    }
-    
-    // 添加起始文件
-    result.insert(std::to_string(start_file->fd.GetNumber()));
-    
-    // 查找与起始文件键范围重叠的文件
-    for (FileMetaData* f : vstorage_->LevelFiles(level)) {
-      if (f->fd.GetNumber() == start_file->fd.GetNumber()) {
-        continue;  // 跳过起始文件本身
-      }
-      
-      if (vstorage_->InternalComparator()->Compare(f->smallest, start_file->largest) <= 0 &&
-          vstorage_->InternalComparator()->Compare(f->largest, start_file->smallest) >= 0) {
-        // 文件与起始文件重叠
-        if (info_log_ != nullptr) {
-          ROCKS_LOG_INFO(info_log_, "找到与起始文件重叠的文件: %s，键范围: [%s, %s]", 
-                         std::to_string(f->fd.GetNumber()).c_str(),
-                         f->smallest.user_key().ToString(true).c_str(),
-                         f->largest.user_key().ToString(true).c_str());
-        }
-        result.insert(std::to_string(f->fd.GetNumber()));
-      }
-    }
-  } else {
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_WARN(info_log_, "层级 %d 没有找到compaction顺序", level);
-    }
-    
-    // 如果没有找到compaction顺序，选择最大的文件
-    FileMetaData* largest_file = nullptr;
-    for (FileMetaData* f : vstorage_->LevelFiles(level)) {
-      if (largest_file == nullptr || f->fd.file_size > largest_file->fd.file_size) {
-        largest_file = f;
-      }
-    }
-    
-    if (largest_file != nullptr) {
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "选择层级 %d 中最大的文件: %s (大小: %llu)作为起始文件", 
-                       level, 
-                       std::to_string(largest_file->fd.GetNumber()).c_str(),
-                       static_cast<unsigned long long>(largest_file->fd.file_size));
-      }
-      result.insert(std::to_string(largest_file->fd.GetNumber()));
-      
-      // 查找与最大文件键范围重叠的文件
-      for (FileMetaData* f : vstorage_->LevelFiles(level)) {
-        if (f->fd.GetNumber() == largest_file->fd.GetNumber()) {
-          continue;  // 跳过最大文件本身
-        }
-        
-        if (vstorage_->InternalComparator()->Compare(f->smallest, largest_file->largest) <= 0 &&
-            vstorage_->InternalComparator()->Compare(f->largest, largest_file->smallest) >= 0) {
-          // 文件与最大文件重叠
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "找到与最大文件重叠的文件: %s，键范围: [%s, %s]", 
-                           std::to_string(f->fd.GetNumber()).c_str(),
-                           f->smallest.user_key().ToString(true).c_str(),
-                           f->largest.user_key().ToString(true).c_str());
-          }
-          result.insert(std::to_string(f->fd.GetNumber()));
-        }
-      }
-    }
+  if (next_index < 0) {
+    // 没有可选文件，直接返回空
+    return result;
+  }
+  // 找到下一个compaction索引
+  FileMetaData* start_file = vstorage_->LevelFiles(level)[next_index];
+  
+  if (info_log_ != nullptr) {
+    ROCKS_LOG_INFO(info_log_, "层级 %d 的起始文件: %s，键范围: [%s, %s]", 
+                   level, 
+                   std::to_string(start_file->fd.GetNumber()).c_str(),
+                   start_file->smallest.user_key().ToString(true).c_str(),
+                   start_file->largest.user_key().ToString(true).c_str());
   }
   
-  // 警告：如果预测的文件数量等于该层的总文件数，说明可能有逻辑错误
-  if (!result.empty() && result.size() == vstorage_->LevelFiles(level).size()) {
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_WARN(info_log_, "警告：预测层级 %d 的所有文件(%zu)都会被compaction", 
-                     level, result.size());
+  // 添加起始文件
+  result.insert(std::to_string(start_file->fd.GetNumber()));
+  
+  // 查找与起始文件键范围重叠的文件
+  for (FileMetaData* f : vstorage_->LevelFiles(level)) {
+    if (f->fd.GetNumber() == start_file->fd.GetNumber()) {
+      continue;  // 跳过起始文件本身
     }
     
-    // 如果预测的文件太多（等于该层的所有文件），可能是逻辑错误，
-    // 限制为该层文件总数的三分之一
-    if (result.size() > 3) {
-      std::set<std::string> limited_result;
-      size_t count = 0;
-      size_t limit = result.size() / 3;
-      
-      for (const auto& file : result) {
-        limited_result.insert(file);
-        count++;
-        if (count >= limit) {
-          break;
-        }
-      }
-      
+    if (vstorage_->InternalComparator()->Compare(f->smallest, start_file->largest) <= 0 &&
+        vstorage_->InternalComparator()->Compare(f->largest, start_file->smallest) >= 0) {
+      // 文件与起始文件重叠
       if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "限制预测的文件数量从 %zu 到 %zu", 
-                       result.size(), limited_result.size());
+        ROCKS_LOG_INFO(info_log_, "找到与起始文件重叠的文件: %s，键范围: [%s, %s]", 
+                       std::to_string(f->fd.GetNumber()).c_str(),
+                       f->smallest.user_key().ToString(true).c_str(),
+                       f->largest.user_key().ToString(true).c_str());
       }
-      
-      return limited_result;
+      result.insert(std::to_string(f->fd.GetNumber()));
     }
   }
   
