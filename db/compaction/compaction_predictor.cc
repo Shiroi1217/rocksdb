@@ -11,6 +11,18 @@ namespace ROCKSDB_NAMESPACE {
 // CompactionPredictor::CompactionPredictor(const VersionStorageInfo* vstorage)
 //     : vstorage_(vstorage) {}
 
+// 辅助函数：将Slice转为可读字符串（优先ASCII，否则16进制）
+static std::string ToReadableString(const Slice& s) {
+  std::string str = s.ToString(false); // false: 尽量输出可打印字符
+  // 检查是否全为可打印字符，否则用16进制
+  for (char c : str) {
+    if (c < 32 || c > 126) {
+      return s.ToString(true); // true: 强制16进制
+    }
+  }
+  return str;
+}
+
 std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
   // 确保获取最新的层信息和分数值
   if (info_log_ != nullptr) {
@@ -27,14 +39,21 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
                        level, vstorage_->CompactionScore(level));
       }
     } else {
-      // 处理分数小于1但上层有score>1且中间层分数都大于0.8的情况
+      // 修正：i层上方有score>1的层，且该上层到i层（包含i层）所有层score都>0.8
       for (int upper = 0; upper < level; ++upper) {
         if (vstorage_->CompactionScore(upper) > 1.0) {
-          if (CheckIntermediateLevelsBetween(upper, level)) {
+          bool all_above_08 = true;
+          for (int l = upper + 1; l <= level; ++l) {
+            if (vstorage_->CompactionScore(l) <= 0.8) {
+              all_above_08 = false;
+              break;
+            }
+          }
+          if (all_above_08) {
             levels_to_check.push_back(level);
             if (info_log_ != nullptr) {
-              ROCKS_LOG_INFO(info_log_, "层级 %d 的分数为 %.2f <= 1.0，但上层 %d 分数 > 1.0 且中间层分数都 > 0.8，将进行预测", 
-                             level, vstorage_->CompactionScore(level), upper);
+              ROCKS_LOG_INFO(info_log_, "层级 %d 的分数为 %.2f <= 1.0，但上层 %d 分数 > 1.0 且[%d,%d]所有层分数都 > 0.8，将进行预测", 
+                             level, vstorage_->CompactionScore(level), upper, upper+1, level);
             }
             break;
           }
@@ -281,8 +300,8 @@ std::set<std::string> CompactionPredictor::GetPossibleTargetFilesForL0Compaction
   
   if (info_log_ != nullptr) {
     ROCKS_LOG_INFO(info_log_, "L0的综合键范围: [%s, %s]", 
-                   smallest_key.ToString(true).c_str(),
-                   largest_key.ToString(true).c_str());
+                   ToReadableString(smallest_key).c_str(),
+                   ToReadableString(largest_key).c_str());
   }
   
   // 查找与L0键范围重叠的L1文件
@@ -297,8 +316,8 @@ std::set<std::string> CompactionPredictor::GetPossibleTargetFilesForL0Compaction
       if (info_log_ != nullptr) {
         ROCKS_LOG_INFO(info_log_, "找到与L0重叠的L1文件: %s，键范围: [%s, %s]", 
                        std::to_string(f->fd.GetNumber()).c_str(),
-                       f->smallest.user_key().ToString(true).c_str(),
-                       f->largest.user_key().ToString(true).c_str());
+                       ToReadableString(f->smallest.user_key()).c_str(),
+                       ToReadableString(f->largest.user_key()).c_str());
       }
       result.insert(std::to_string(f->fd.GetNumber()));
     }
@@ -381,13 +400,14 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
   
   if (info_log_ != nullptr) {
     ROCKS_LOG_INFO(info_log_, "源文件的综合键范围: [%s, %s]", 
-                   smallest_key.ToString(true).c_str(),
-                   largest_key.ToString(true).c_str());
+                   ToReadableString(smallest_key).c_str(),
+                   ToReadableString(largest_key).c_str());
   }
   
   // 查找与源文件键范围重叠的目标层文件
   const std::vector<FileMetaData*>& target_files = vstorage_->LevelFiles(target_level);
   for (FileMetaData* f : target_files) {
+    if (f->being_compacted) continue;
     if (vstorage_->InternalComparator()->user_comparator()->Compare(
           f->largest.user_key(), smallest_key) >= 0 &&
         vstorage_->InternalComparator()->user_comparator()->Compare(
@@ -396,8 +416,8 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
       if (info_log_ != nullptr) {
         ROCKS_LOG_INFO(info_log_, "找到与源文件重叠的目标层文件: %s，键范围: [%s, %s]", 
                        std::to_string(f->fd.GetNumber()).c_str(),
-                       f->smallest.user_key().ToString(true).c_str(),
-                       f->largest.user_key().ToString(true).c_str());
+                       ToReadableString(f->smallest.user_key()).c_str(),
+                       ToReadableString(f->largest.user_key()).c_str());
       }
       result.insert(std::to_string(f->fd.GetNumber()));
     }
@@ -478,6 +498,7 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
   // 检查是否有文件已经被标记为compaction
   int marked_for_compaction = 0;
   for (FileMetaData* f : vstorage_->LevelFiles(level)) {
+    if (f->being_compacted) continue;
     if (f->marked_for_compaction) {
       marked_for_compaction++;
     }
@@ -496,40 +517,39 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
     return result;
   }
   
-  // 对于非L0层，通过compaction优先级获取文件
+  // 选出下一个compaction索引的文件（起始文件S）
   int next_index = vstorage_->NextCompactionIndex(level);
   if (next_index < 0) {
     // 没有可选文件，直接返回空
     return result;
   }
-  // 找到下一个compaction索引
   FileMetaData* start_file = vstorage_->LevelFiles(level)[next_index];
   
   if (info_log_ != nullptr) {
     ROCKS_LOG_INFO(info_log_, "层级 %d 的起始文件: %s，键范围: [%s, %s]", 
                    level, 
                    std::to_string(start_file->fd.GetNumber()).c_str(),
-                   start_file->smallest.user_key().ToString(true).c_str(),
-                   start_file->largest.user_key().ToString(true).c_str());
+                   ToReadableString(start_file->smallest.user_key()).c_str(),
+                   ToReadableString(start_file->largest.user_key()).c_str());
   }
   
-  // 添加起始文件
+  // 1. 先将起始文件S加入预测集
   result.insert(std::to_string(start_file->fd.GetNumber()));
   
-  // 查找与起始文件键范围重叠的文件
+  // 2. 遍历本层所有文件，凡是与S重叠且未被其它compaction占用的T，都一并加入预测集
   for (FileMetaData* f : vstorage_->LevelFiles(level)) {
+    if (f->being_compacted) continue;
     if (f->fd.GetNumber() == start_file->fd.GetNumber()) {
       continue;  // 跳过起始文件本身
     }
-    
+    // 判断重叠：只要有重叠就加入
     if (vstorage_->InternalComparator()->Compare(f->smallest, start_file->largest) <= 0 &&
         vstorage_->InternalComparator()->Compare(f->largest, start_file->smallest) >= 0) {
-      // 文件与起始文件重叠
       if (info_log_ != nullptr) {
         ROCKS_LOG_INFO(info_log_, "找到与起始文件重叠的文件: %s，键范围: [%s, %s]", 
                        std::to_string(f->fd.GetNumber()).c_str(),
-                       f->smallest.user_key().ToString(true).c_str(),
-                       f->largest.user_key().ToString(true).c_str());
+                       ToReadableString(f->smallest.user_key()).c_str(),
+                       ToReadableString(f->largest.user_key()).c_str());
       }
       result.insert(std::to_string(f->fd.GetNumber()));
     }
@@ -574,6 +594,7 @@ double CompactionPredictor::CalculateNewScore(int level, const std::set<std::str
   uint64_t files_to_remove_size = 0;
   
   for (FileMetaData* f : vstorage_->LevelFiles(level)) {
+    if (f->being_compacted) continue;
     total_size += f->fd.file_size;
     
     if (files_to_remove.find(std::to_string(f->fd.GetNumber())) != files_to_remove.end()) {
@@ -678,6 +699,8 @@ std::set<std::string> CompactionPredictor::GetNextCompactionFilesFrom(
       continue;  // 已被排除
     }
     
+    if (f->being_compacted) continue;
+    
     if (largest_file == nullptr || f->fd.file_size > largest_file->fd.file_size) {
       largest_file = f;
     }
@@ -695,6 +718,7 @@ std::set<std::string> CompactionPredictor::GetNextCompactionFilesFrom(
     
     // 查找与最大文件键范围重叠的文件
     for (FileMetaData* f : vstorage_->LevelFiles(level)) {
+      if (f->being_compacted) continue;
       if (f->fd.GetNumber() == largest_file->fd.GetNumber() ||
           excluded_files.find(std::to_string(f->fd.GetNumber())) != excluded_files.end()) {
         continue;  // 跳过最大文件本身和已排除的文件
@@ -706,8 +730,8 @@ std::set<std::string> CompactionPredictor::GetNextCompactionFilesFrom(
         if (info_log_ != nullptr) {
           ROCKS_LOG_INFO(info_log_, "找到与最大文件重叠的文件: %s，键范围: [%s, %s]", 
                          std::to_string(f->fd.GetNumber()).c_str(),
-                         f->smallest.user_key().ToString(true).c_str(),
-                         f->largest.user_key().ToString(true).c_str());
+                         ToReadableString(f->smallest.user_key()).c_str(),
+                         ToReadableString(f->largest.user_key()).c_str());
         }
         result.insert(std::to_string(f->fd.GetNumber()));
       }
