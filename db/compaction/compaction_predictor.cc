@@ -24,12 +24,9 @@ static std::string ToReadableString(const Slice& s) {
 }
 
 std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
-  // 确保获取最新的层信息和分数值
   if (info_log_ != nullptr) {
     ROCKS_LOG_INFO(info_log_, "PredictCompactionFiles: 正在获取最新的层信息和分数值");
   }
-
-  // 查找所有score > 1.0的层级
   std::vector<int> levels_to_check;
   for (int level = 0; level < vstorage_->num_levels() - 1; level++) {
     if (vstorage_->CompactionScore(level) > 1.0) {
@@ -39,7 +36,6 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
                        level, vstorage_->CompactionScore(level));
       }
     } else {
-      // 修正：i层上方有score>1的层，且该上层到i层（包含i层）所有层score都>0.8
       for (int upper = 0; upper < level; ++upper) {
         if (vstorage_->CompactionScore(upper) > 1.0) {
           bool all_above_08 = true;
@@ -61,25 +57,21 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
       }
     }
   }
-
   std::set<std::string> result;
-  
-  // 如果没有层级需要预测，直接返回空结果
+  std::set<std::string> predicted_files; // 新增：全局已预测SST文件集合
   if (levels_to_check.empty()) {
     if (info_log_ != nullptr) {
       ROCKS_LOG_INFO(info_log_, "没有层级需要进行compaction预测");
     }
     return result;
   }
-
-  // 针对L0特殊处理：如果L0的score > 1.0，只预测L1文件
+  // L0->L1特殊处理
   if (vstorage_->CompactionScore(0) > 1.0) {
     if (info_log_ != nullptr) {
       ROCKS_LOG_INFO(info_log_, "L0的分数为 %.2f > 1.0，开始预测L0到L1的compaction", 
                      vstorage_->CompactionScore(0));
     }
     std::set<std::string> l1_files = GetPossibleTargetFilesForL0Compaction();
-    
     if (!l1_files.empty()) {
       if (info_log_ != nullptr) {
         ROCKS_LOG_INFO(info_log_, "为L0到L1 compaction预测了 %zu 个L1文件", l1_files.size());
@@ -89,146 +81,137 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
         }
         ROCKS_LOG_DEBUG(info_log_, "预测的L1文件: %s", files_str.c_str());
       }
-      
-      // 将L1文件加入结果集
       result.insert(l1_files.begin(), l1_files.end());
+      predicted_files.insert(l1_files.begin(), l1_files.end());
     } else {
       if (info_log_ != nullptr) {
         ROCKS_LOG_INFO(info_log_, "没有找到L0到L1 compaction的目标文件");
       }
     }
   }
-  
-  // 对每个需要检查的层级，尝试预测最多3次
+  // 只对1层及以上做"排除已被预测SST文件"逻辑
   for (int level : levels_to_check) {
     if (level == 0 && vstorage_->CompactionScore(0) > 1.0) {
-      // L0已经在上面处理过了，跳过
       continue;
     }
-    
     if (info_log_ != nullptr) {
       ROCKS_LOG_INFO(info_log_, "开始预测层级 %d 的compaction，当前分数: %.2f", 
                      level, vstorage_->CompactionScore(level));
     }
-    
     std::set<std::string> level_files = GetLevelCompactionFiles(level);
-    if (!level_files.empty()) {
-      // 加入预测结果
-      result.insert(level_files.begin(), level_files.end());
-      
-      // 预测下一层的文件
-      if (level + 1 < vstorage_->num_levels()) {
-        if (info_log_ != nullptr) {
-          ROCKS_LOG_INFO(info_log_, "预测层级 %d 到 %d 的compaction涉及的目标层文件", 
-                         level, level + 1);
-        }
-        
-        std::set<std::string> target_files = GetTargetLevelFilesForCompaction(
-            level, level + 1, level_files);
-        
-        if (!target_files.empty()) {
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "为层级 %d 到 %d 的compaction预测了 %zu 个目标层文件", 
-                           level, level + 1, target_files.size());
-            std::string files_str;
-            for (const auto& file : target_files) {
-              files_str += file + " ";
-            }
-            ROCKS_LOG_DEBUG(info_log_, "预测的层级 %d 文件: %s", level + 1, files_str.c_str());
-          }
-          
-          // 将目标层文件加入结果集
-          result.insert(target_files.begin(), target_files.end());
-        } else {
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 到 %d 的compaction目标文件", 
-                           level, level + 1);
-          }
-        }
-      }
-      
-      // 计算新的score
-      double new_score = CalculateNewScore(level, level_files);
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "层级 %d 在预测compaction后的新分数: %.2f", 
-                       level, new_score);
-      }
-      
-      // 如果新分数仍然 > 1.0，尝试预测更多文件（最多3次）
-      int attempt = 1;
-      std::set<std::string> excluded_files = level_files;
-      while (new_score > 1.0 && attempt < 3) {
-        if (info_log_ != nullptr) {
-          ROCKS_LOG_INFO(info_log_, "层级 %d 的新分数 %.2f 仍然 > 1.0，尝试预测更多文件（尝试 %d/3）", 
-                         level, new_score, attempt + 1);
-        }
-        
-        std::set<std::string> additional_files = GetNextCompactionFilesFrom(level, excluded_files);
-        if (additional_files.empty()) {
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 的更多文件", level);
-          }
-          break;
-        }
-        
-        if (info_log_ != nullptr) {
-          ROCKS_LOG_INFO(info_log_, "为层级 %d 额外预测了 %zu 个文件", 
-                         level, additional_files.size());
-          std::string files_str;
-          for (const auto& file : additional_files) {
-            files_str += file + " ";
-          }
-          ROCKS_LOG_DEBUG(info_log_, "额外预测的文件: %s", files_str.c_str());
-        }
-        
-        // 加入预测结果
-        result.insert(additional_files.begin(), additional_files.end());
-        excluded_files.insert(additional_files.begin(), additional_files.end());
-        
-        // 预测下一层的文件
-        if (level + 1 < vstorage_->num_levels()) {
-          std::set<std::string> additional_target_files = GetTargetLevelFilesForCompaction(
-              level, level + 1, additional_files);
-          
-          if (!additional_target_files.empty()) {
-            if (info_log_ != nullptr) {
-              ROCKS_LOG_INFO(info_log_, "为额外的层级 %d 到 %d 的compaction预测了 %zu 个目标层文件", 
-                             level, level + 1, additional_target_files.size());
-              std::string files_str;
-              for (const auto& file : additional_target_files) {
-                files_str += file + " ";
-              }
-              ROCKS_LOG_DEBUG(info_log_, "额外预测的层级 %d 文件: %s", 
-                             level + 1, files_str.c_str());
-            }
-            
-            // 将目标层文件加入结果集
-            result.insert(additional_target_files.begin(), additional_target_files.end());
-          }
-        }
-        
-        // 计算新的score
-        new_score = CalculateNewScore(level, excluded_files);
-        if (info_log_ != nullptr) {
-          ROCKS_LOG_INFO(info_log_, "层级 %d 在额外预测compaction后的新分数: %.2f", 
-                         level, new_score);
-        }
-        
-        attempt++;
-      }
-    } else {
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 的compaction文件", level);
+    // 新增：排除已被低层预测的SST文件
+    std::set<std::string> filtered_files;
+    for (const auto& file : level_files) {
+      if (predicted_files.count(file) == 0) {
+        filtered_files.insert(file);
       }
     }
+    if (!filtered_files.empty()) {
+      result.insert(filtered_files.begin(), filtered_files.end());
+      predicted_files.insert(filtered_files.begin(), filtered_files.end());
+    }
+    // 预测下一层的文件
+    if (level + 1 < vstorage_->num_levels()) {
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "预测层级 %d 到 %d 的compaction涉及的目标层文件", 
+                       level, level + 1);
+      }
+      std::set<std::string> target_files = GetTargetLevelFilesForCompaction(
+          level, level + 1, filtered_files);
+      if (!target_files.empty()) {
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "为层级 %d 到 %d 的compaction预测了 %zu 个目标层文件", 
+                         level, level + 1, target_files.size());
+          std::string files_str;
+          for (const auto& file : target_files) {
+            files_str += file + " ";
+          }
+          ROCKS_LOG_DEBUG(info_log_, "预测的层级 %d 文件: %s", level + 1, files_str.c_str());
+        }
+        // 目标层文件也要排除已被预测的
+        std::set<std::string> filtered_target_files;
+        for (const auto& file : target_files) {
+          if (predicted_files.count(file) == 0) {
+            filtered_target_files.insert(file);
+          }
+        }
+        if (!filtered_target_files.empty()) {
+          result.insert(filtered_target_files.begin(), filtered_target_files.end());
+          predicted_files.insert(filtered_target_files.begin(), filtered_target_files.end());
+        }
+      } else {
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 到 %d 的compaction目标文件", 
+                         level, level + 1);
+        }
+      }
+    }
+    // 计算新的score、尝试多轮预测等，均用filtered_files和predicted_files
+    double new_score = CalculateNewScore(level, filtered_files);
+    if (info_log_ != nullptr) {
+      ROCKS_LOG_INFO(info_log_, "层级 %d 在预测compaction后的新分数: %.2f", 
+                     level, new_score);
+    }
+    int attempt = 1;
+    std::set<std::string> excluded_files = filtered_files;
+    while (new_score > 1.0 && attempt < 3) {
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "层级 %d 的新分数 %.2f 仍然 > 1.0，尝试预测更多文件（尝试 %d/3）", 
+                       level, new_score, attempt + 1);
+      }
+      std::set<std::string> additional_files = GetNextCompactionFilesFrom(level, excluded_files);
+      // 新增：排除已被预测的
+      std::set<std::string> filtered_additional_files;
+      for (const auto& file : additional_files) {
+        if (predicted_files.count(file) == 0) {
+          filtered_additional_files.insert(file);
+        }
+      }
+      if (filtered_additional_files.empty()) {
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 的更多文件", level);
+        }
+        break;
+      }
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "为层级 %d 额外预测了 %zu 个文件", 
+                       level, filtered_additional_files.size());
+        std::string files_str;
+        for (const auto& file : filtered_additional_files) {
+          files_str += file + " ";
+        }
+        ROCKS_LOG_DEBUG(info_log_, "额外预测的文件: %s", files_str.c_str());
+      }
+      result.insert(filtered_additional_files.begin(), filtered_additional_files.end());
+      predicted_files.insert(filtered_additional_files.begin(), filtered_additional_files.end());
+      excluded_files.insert(filtered_additional_files.begin(), filtered_additional_files.end());
+      // 预测下一层的文件
+      if (level + 1 < vstorage_->num_levels()) {
+        std::set<std::string> additional_target_files = GetTargetLevelFilesForCompaction(
+            level, level + 1, filtered_additional_files);
+        // 目标层文件也要排除已被预测的
+        std::set<std::string> filtered_additional_target_files;
+        for (const auto& file : additional_target_files) {
+          if (predicted_files.count(file) == 0) {
+            filtered_additional_target_files.insert(file);
+          }
+        }
+        if (!filtered_additional_target_files.empty()) {
+          result.insert(filtered_additional_target_files.begin(), filtered_additional_target_files.end());
+          predicted_files.insert(filtered_additional_target_files.begin(), filtered_additional_target_files.end());
+        }
+      }
+      new_score = CalculateNewScore(level, excluded_files);
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "层级 %d 在额外预测compaction后的新分数: %.2f", 
+                       level, new_score);
+      }
+      attempt++;
+    }
   }
-  
-  // 更新预测文件集合
   for (const auto& file : result) {
     predicted_files_[file]++;
   }
-  
-  // 输出最终预测结果
   if (info_log_ != nullptr) {
     if (!result.empty()) {
       ROCKS_LOG_INFO(info_log_, "总共预测了 %zu 个文件用于下一轮compaction", result.size());
@@ -241,7 +224,6 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
       ROCKS_LOG_INFO(info_log_, "没有预测到任何文件用于下一轮compaction");
     }
   }
-  
   return result;
 }
 
@@ -482,49 +464,21 @@ bool CompactionPredictor::CheckIntermediateLevelsBetween(int start_level, int ta
 
 std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
   std::set<std::string> result;
-  
   if (level < 0 || level >= vstorage_->num_levels() - 1) {
     if (info_log_ != nullptr) {
       ROCKS_LOG_WARN(info_log_, "GetLevelCompactionFiles: 无效的层级 %d", level);
     }
     return result;
   }
-  
   if (info_log_ != nullptr) {
     ROCKS_LOG_INFO(info_log_, "GetLevelCompactionFiles: 层级 %d 总文件数: %zu", 
                    level, vstorage_->LevelFiles(level).size());
   }
-  
-  // 检查是否有文件已经被标记为compaction
-  int marked_for_compaction = 0;
-  for (FileMetaData* f : vstorage_->LevelFiles(level)) {
-    if (f->being_compacted) continue;
-    if (f->marked_for_compaction) {
-      marked_for_compaction++;
-    }
-  }
-  
-  if (marked_for_compaction > 0 && info_log_ != nullptr) {
-    ROCKS_LOG_INFO(info_log_, "层级 %d 有 %d 个文件已被标记为compaction", 
-                   level, marked_for_compaction);
-  }
-  
-  // L0 层的预测逻辑不同，如果调用到这个方法，说明可能是错误的
-  if (level == 0) {
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_WARN(info_log_, "对L0调用GetLevelCompactionFiles而不是使用特定的L0处理逻辑");
-    }
-    return result;
-  }
-  
-  // 选出下一个compaction索引的文件（起始文件S）
   int next_index = vstorage_->NextCompactionIndex(level);
   if (next_index < 0) {
-    // 没有可选文件，直接返回空
     return result;
   }
   FileMetaData* start_file = vstorage_->LevelFiles(level)[next_index];
-  
   if (info_log_ != nullptr) {
     ROCKS_LOG_INFO(info_log_, "层级 %d 的起始文件: %s，键范围: [%s, %s]", 
                    level, 
@@ -532,40 +486,58 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
                    ToReadableString(start_file->smallest.user_key()).c_str(),
                    ToReadableString(start_file->largest.user_key()).c_str());
   }
-  
-  // 1. 先将起始文件S加入预测集
-  result.insert(std::to_string(start_file->fd.GetNumber()));
-  
-  // 2. 遍历本层所有文件，凡是与S重叠且未被其它compaction占用的T，都一并加入预测集
-  for (FileMetaData* f : vstorage_->LevelFiles(level)) {
-    if (f->being_compacted) continue;
-    if (f->fd.GetNumber() == start_file->fd.GetNumber()) {
-      continue;  // 跳过起始文件本身
-    }
-    // 判断重叠：只要有重叠就加入
-    if (vstorage_->InternalComparator()->Compare(f->smallest, start_file->largest) <= 0 &&
-        vstorage_->InternalComparator()->Compare(f->largest, start_file->smallest) >= 0) {
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "找到与起始文件重叠的文件: %s，键范围: [%s, %s]", 
-                       std::to_string(f->fd.GetNumber()).c_str(),
-                       ToReadableString(f->smallest.user_key()).c_str(),
-                       ToReadableString(f->largest.user_key()).c_str());
+  // clean cut递归扩展重叠文件，直到没有新文件加入
+  std::set<FileMetaData*> current_set, last_set;
+  current_set.insert(start_file);
+  do {
+    last_set = current_set;
+    // 计算当前集合的最小、最大user_key
+    Slice min_key, max_key;
+    bool first = true;
+    for (auto* f : current_set) {
+      if (first) {
+        min_key = f->smallest.user_key();
+        max_key = f->largest.user_key();
+        first = false;
+      } else {
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(f->smallest.user_key(), min_key) < 0) {
+          min_key = f->smallest.user_key();
+        }
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(f->largest.user_key(), max_key) > 0) {
+          max_key = f->largest.user_key();
+        }
       }
-      result.insert(std::to_string(f->fd.GetNumber()));
     }
+    // 扩展所有重叠文件
+    for (FileMetaData* f : vstorage_->LevelFiles(level)) {
+      if (f->being_compacted) continue;
+      if (current_set.count(f)) continue;
+      if (vstorage_->InternalComparator()->user_comparator()->Compare(f->largest.user_key(), min_key) >= 0 &&
+          vstorage_->InternalComparator()->user_comparator()->Compare(f->smallest.user_key(), max_key) <= 0) {
+        current_set.insert(f);
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "clean cut扩展: 加入重叠文件: %s，键范围: [%s, %s]", 
+                         std::to_string(f->fd.GetNumber()).c_str(),
+                         ToReadableString(f->smallest.user_key()).c_str(),
+                         ToReadableString(f->largest.user_key()).c_str());
+        }
+      }
+    }
+  } while (current_set.size() > last_set.size());
+  // 输出最终预测集
+  for (auto* f : current_set) {
+    result.insert(std::to_string(f->fd.GetNumber()));
   }
-  
   if (info_log_ != nullptr) {
-    ROCKS_LOG_INFO(info_log_, "层级 %d 总共预测了 %zu 个文件", level, result.size());
+    ROCKS_LOG_INFO(info_log_, "层级 %d clean cut后预测了 %zu 个文件", level, result.size());
     if (!result.empty()) {
       std::string files_str;
       for (const auto& file : result) {
         files_str += file + " ";
       }
-      ROCKS_LOG_DEBUG(info_log_, "预测的文件: %s", files_str.c_str());
+      ROCKS_LOG_DEBUG(info_log_, "clean cut预测的文件: %s", files_str.c_str());
     }
   }
-  
   return result;
 }
 
