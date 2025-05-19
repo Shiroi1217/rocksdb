@@ -474,6 +474,38 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
     ROCKS_LOG_INFO(info_log_, "GetLevelCompactionFiles: 层级 %d 总文件数: %zu", 
                    level, vstorage_->LevelFiles(level).size());
   }
+
+  // 新增：RR策略下采用顺序推进+批量无重叠选取
+  if (immutable_options_ && mutable_cf_options_ &&
+      immutable_options_->compaction_pri == kRoundRobin &&
+      immutable_options_->compaction_style == kCompactionStyleLevel) {
+    const auto& files = vstorage_->LevelFiles(level);
+    int next_index = vstorage_->NextCompactionIndex(level);
+    if (next_index < 0 || next_index >= static_cast<int>(files.size())) return result;
+    uint64_t total_size = 0;
+    uint64_t max_bytes = mutable_cf_options_->max_compaction_bytes;
+    for (int i = next_index; i < static_cast<int>(files.size()); ++i) {
+      FileMetaData* f = files[i];
+      if (f->being_compacted) break;
+      if (!result.empty()) {
+        // 检查与前一个文件是否有重叠
+        auto last_file = files[i-1];
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(
+              last_file->largest.user_key(), f->smallest.user_key()) >= 0) {
+          break; // 有重叠，停止
+        }
+      }
+      if (total_size + f->fd.file_size > max_bytes) break;
+      result.insert(std::to_string(f->fd.GetNumber()));
+      total_size += f->fd.file_size;
+    }
+    if (info_log_ != nullptr) {
+      ROCKS_LOG_INFO(info_log_, "[RR预测] 层级 %d 预测了 %zu 个文件", level, result.size());
+    }
+    return result;
+  }
+
+  // 原有clean cut递归扩展重叠文件，直到没有新文件加入
   int next_index = vstorage_->NextCompactionIndex(level);
   if (next_index < 0) {
     return result;
@@ -486,12 +518,10 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
                    ToReadableString(start_file->smallest.user_key()).c_str(),
                    ToReadableString(start_file->largest.user_key()).c_str());
   }
-  // clean cut递归扩展重叠文件，直到没有新文件加入
   std::set<FileMetaData*> current_set, last_set;
   current_set.insert(start_file);
   do {
     last_set = current_set;
-    // 计算当前集合的最小、最大user_key
     Slice min_key, max_key;
     bool first = true;
     for (auto* f : current_set) {
@@ -508,7 +538,6 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
         }
       }
     }
-    // 扩展所有重叠文件
     for (FileMetaData* f : vstorage_->LevelFiles(level)) {
       if (f->being_compacted) continue;
       if (current_set.count(f)) continue;
@@ -524,7 +553,6 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
       }
     }
   } while (current_set.size() > last_set.size());
-  // 输出最终预测集
   for (auto* f : current_set) {
     result.insert(std::to_string(f->fd.GetNumber()));
   }

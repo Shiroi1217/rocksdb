@@ -282,21 +282,21 @@ void CompactionJob::PredictNextCompactionFiles() {
   }
 
   // 输出预测后的层级分数
-  ROCKS_LOG_INFO(db_options_.info_log, "模拟compaction后的分数:");
-  for (int level = 0; level < vstorage->num_levels() - 1; level++) {
-    if (predictions.find(level) != predictions.end() && !predictions[level].empty()) {
-      std::set<std::string> level_files;
-      for (const auto& file : predictions[level]) {
-        level_files.insert(std::to_string(file->fd.GetNumber()));
-      }
-      double new_score = predictor.CalculateNewScore(level, level_files);
-      ROCKS_LOG_INFO(db_options_.info_log, "层级 %d: 当前分数 %.2f -> 预测新分数 %.2f", 
-                   level, vstorage->CompactionScore(level), new_score);
-    } else {
-      ROCKS_LOG_INFO(db_options_.info_log, "层级 %d: 分数不变 %.2f", 
-                   level, vstorage->CompactionScore(level));
-    }
-  }
+  // ROCKS_LOG_INFO(db_options_.info_log, "模拟compaction后的分数:");
+  // for (int level = 0; level < vstorage->num_levels() - 1; level++) {
+  //   if (predictions.find(level) != predictions.end() && !predictions[level].empty()) {
+  //     std::set<std::string> level_files;
+  //     for (const auto& file : predictions[level]) {
+  //       level_files.insert(std::to_string(file->fd.GetNumber()));
+  //     }
+  //     double new_score = predictor.CalculateNewScore(level, level_files);
+  //     ROCKS_LOG_INFO(db_options_.info_log, "层级 %d: 当前分数 %.2f -> 预测新分数 %.2f", 
+  //                  level, vstorage->CompactionScore(level), new_score);
+  //   } else {
+  //     ROCKS_LOG_INFO(db_options_.info_log, "层级 %d: 分数不变 %.2f", 
+  //                  level, vstorage->CompactionScore(level));
+  //   }
+  // }
 }
 
 CompactionJob::~CompactionJob() {
