@@ -8,6 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/compaction/compaction_picker.h"
+#include "db/compaction/compaction_picker_level.h"
 
 #include <cinttypes>
 #include <limits>
@@ -1262,8 +1263,8 @@ std::vector<FileMetaData*> CompactionPicker::SimulateRoundRobinPick(
     int level, VersionStorageInfo* vstorage,
     const MutableCFOptions& mutable_cf_options,
     const ImmutableOptions& ioptions) {
-  // 创建一个临时的CompactionPicker实例来复用其逻辑
-  CompactionPicker picker(ioptions, vstorage->InternalComparator());
+  // 创建一个临时的LevelCompactionPicker实例来复用其逻辑
+  LevelCompactionPicker picker(ioptions, vstorage->InternalComparator());
   
   // 获取下一个要处理的文件索引
   int start_index = vstorage->NextCompactionIndex(level);
@@ -1281,15 +1282,25 @@ std::vector<FileMetaData*> CompactionPicker::SimulateRoundRobinPick(
     return {};
   }
 
+  // 使用picker的SetupOtherInputs逻辑来确保选择正确的文件
+  CompactionInputFiles output_level_inputs;
+  output_level_inputs.level = level + 1;
+  int parent_index = -1;
+  if (!picker.SetupOtherInputs("", mutable_cf_options, vstorage,
+                              &inputs, &output_level_inputs, &parent_index, -1)) {
+    return {};
+  }
+
   return inputs.files;
 }
 
 std::vector<FileMetaData*> CompactionPicker::SimulateCleanCutExpansion(
     int level, VersionStorageInfo* vstorage,
     const InternalKeyComparator* icmp,
+    const ImmutableOptions& ioptions,
     FileMetaData* start_file) {
-  // 创建一个临时的CompactionPicker实例来复用其逻辑
-  CompactionPicker picker(vstorage->GetImmutableOptions(), icmp);
+  // 创建一个临时的LevelCompactionPicker实例来复用其逻辑
+  LevelCompactionPicker picker(ioptions, icmp);
   
   CompactionInputFiles inputs;
   inputs.level = level;
@@ -1307,9 +1318,11 @@ std::vector<FileMetaData*> CompactionPicker::SimulateTargetLevelPick(
     int source_level, int target_level,
     VersionStorageInfo* vstorage,
     const InternalKeyComparator* icmp,
+    const ImmutableOptions& ioptions,
+    const MutableCFOptions& mutable_cf_options,
     const std::vector<FileMetaData*>& source_files) {
-  // 创建一个临时的CompactionPicker实例来复用其逻辑
-  CompactionPicker picker(vstorage->GetImmutableOptions(), icmp);
+  // 创建一个临时的LevelCompactionPicker实例来复用其逻辑
+  LevelCompactionPicker picker(ioptions, icmp);
   
   CompactionInputFiles inputs;
   inputs.level = source_level;
@@ -1320,7 +1333,7 @@ std::vector<FileMetaData*> CompactionPicker::SimulateTargetLevelPick(
   
   int parent_index = -1;
   // 使用picker的SetupOtherInputs逻辑
-  if (!picker.SetupOtherInputs("", vstorage->GetMutableCFOptions(), vstorage,
+  if (!picker.SetupOtherInputs("", mutable_cf_options, vstorage,
                               &inputs, &output_level_inputs, &parent_index, -1)) {
     return {};
   }

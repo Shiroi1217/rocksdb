@@ -247,6 +247,7 @@ class CompactionPicker {
       int level,
       VersionStorageInfo* vstorage,
       const InternalKeyComparator* icmp,
+      const ImmutableOptions& ioptions,
       FileMetaData* start_file);
 
   static std::vector<FileMetaData*> SimulateTargetLevelPick(
@@ -254,6 +255,8 @@ class CompactionPicker {
       int target_level,
       VersionStorageInfo* vstorage,
       const InternalKeyComparator* icmp,
+      const ImmutableOptions& ioptions,
+      const MutableCFOptions& mutable_cf_options,
       const std::vector<FileMetaData*>& source_files);
 
  protected:

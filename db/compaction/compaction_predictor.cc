@@ -326,6 +326,8 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
           target_level,
           const_cast<VersionStorageInfo*>(vstorage_),
           vstorage_->InternalComparator(),
+          *immutable_options_,
+          *mutable_cf_options_,
           source_file_ptrs);
 
       // 转换预测结果为字符串集合
@@ -432,6 +434,7 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
           level,
           const_cast<VersionStorageInfo*>(vstorage_),
           vstorage_->InternalComparator(),
+          *immutable_options_,
           start_file);
     }
 
