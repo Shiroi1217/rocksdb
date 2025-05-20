@@ -6,6 +6,8 @@
 #include <map>
 #include "db/version_set.h"
 #include <vector>
+#include <memory>
+#include "db/compaction/compaction_picker_level.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -21,24 +23,14 @@ public:
   CompactionPredictor(const VersionStorageInfo* vstorage,
                      const ImmutableOptions* immutable_options,
                      const MutableCFOptions* mutable_cf_options,
-                     Logger* info_log = nullptr)
-    : vstorage_(vstorage),
-      picker_(nullptr),
-      immutable_options_(immutable_options),
-      mutable_cf_options_(mutable_cf_options),
-      info_log_(info_log) {}
+                     Logger* info_log = nullptr);
   
   // 添加新的构造函数，接收options参数和日志
   CompactionPredictor(const VersionStorageInfo* vstorage,
                      CompactionPicker* picker,
                      const ImmutableOptions* immutable_options,
                      const MutableCFOptions* mutable_cf_options,
-                     Logger* info_log = nullptr)
-    : vstorage_(vstorage),
-      picker_(picker),
-      immutable_options_(immutable_options),
-      mutable_cf_options_(mutable_cf_options),
-      info_log_(info_log) {}
+                     Logger* info_log = nullptr);
   
   // 预测下一轮compaction会包含哪些文件
   std::set<std::string> PredictCompactionFiles();
@@ -113,7 +105,7 @@ public:
 
 private:
   const VersionStorageInfo* vstorage_;
-  CompactionPicker* picker_;
+  std::unique_ptr<CompactionPicker> picker_;
   // 保存当前预测的文件集合及其出现次数
   std::map<std::string, int> predicted_files_;
   // 添加options成员变量

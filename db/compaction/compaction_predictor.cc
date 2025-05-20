@@ -7,9 +7,31 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-// 由于构造函数在头文件中已定义为内联函数，这里删除构造函数定义
-// CompactionPredictor::CompactionPredictor(const VersionStorageInfo* vstorage)
-//     : vstorage_(vstorage) {}
+CompactionPredictor::CompactionPredictor(
+    const VersionStorageInfo* vstorage,
+    const ImmutableOptions* immutable_options,
+    const MutableCFOptions* mutable_cf_options,
+    Logger* info_log)
+    : vstorage_(vstorage),
+      immutable_options_(immutable_options),
+      mutable_cf_options_(mutable_cf_options),
+      info_log_(info_log) {
+  picker_ = std::make_unique<LevelCompactionPicker>(
+      *immutable_options_, vstorage->InternalComparator());
+}
+
+CompactionPredictor::CompactionPredictor(
+    const VersionStorageInfo* vstorage,
+    CompactionPicker* picker,
+    const ImmutableOptions* immutable_options,
+    const MutableCFOptions* mutable_cf_options,
+    Logger* info_log)
+    : vstorage_(vstorage),
+      immutable_options_(immutable_options),
+      mutable_cf_options_(mutable_cf_options),
+      info_log_(info_log) {
+  picker_ = std::unique_ptr<CompactionPicker>(picker);
+}
 
 // 辅助函数：将Slice转为可读字符串（优先ASCII，否则16进制）
 static std::string ToReadableString(const Slice& s) {
@@ -307,51 +329,44 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
     return result;
   }
 
-  // 使用Picker的公共方法进行预测
-  if (picker_) {
-    // 将源文件字符串转换为FileMetaData指针
-    std::vector<FileMetaData*> source_file_ptrs;
-    for (const auto& source_file_str : source_files) {
-      for (FileMetaData* f : vstorage_->LevelFiles(source_level)) {
-        if (std::to_string(f->fd.GetNumber()) == source_file_str) {
-          source_file_ptrs.push_back(f);
-          break;
+  // 使用 picker 的 PickCompaction 方法进行预测
+  Compaction* c = picker_->PickCompaction(
+      "", *mutable_cf_options_, MutableDBOptions(),
+      std::vector<SequenceNumber>(), nullptr,
+      const_cast<VersionStorageInfo*>(vstorage_),
+      nullptr);
+      
+  if (c != nullptr) {
+    // 收集预测的目标层文件
+    for (const auto& input : *c->inputs()) {
+      if (input.level == target_level) {
+        for (const auto* f : input.files) {
+          result.insert(std::to_string(f->fd.GetNumber()));
+          if (info_log_ != nullptr) {
+            ROCKS_LOG_INFO(info_log_, "预测目标层文件: L%d 文件 %lu [%s .. %s] (大小: %llu)", 
+                          target_level, f->fd.GetNumber(),
+                          ToReadableString(f->smallest.user_key()).c_str(),
+                          ToReadableString(f->largest.user_key()).c_str(),
+                          static_cast<unsigned long long>(f->fd.file_size));
+          }
         }
       }
     }
+    delete c;
+  }
 
-    if (!source_file_ptrs.empty()) {
-      auto predicted_files = CompactionPicker::SimulateTargetLevelPick(
-          source_level,
-          target_level,
-          const_cast<VersionStorageInfo*>(vstorage_),
-          vstorage_->InternalComparator(),
-          *immutable_options_,
-          *mutable_cf_options_,
-          source_file_ptrs);
-
-      // 转换预测结果为字符串集合
-      for (auto* f : predicted_files) {
-        result.insert(std::to_string(f->fd.GetNumber()));
+  if (info_log_ != nullptr) {
+    ROCKS_LOG_INFO(info_log_, "使用Picker预测: 目标层 %d 预测了 %zu 个文件", 
+                   target_level, result.size());
+    if (!result.empty()) {
+      std::string files_str;
+      for (const auto& file : result) {
+        files_str += file + " ";
       }
-
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "使用Picker预测: 目标层 %d 预测了 %zu 个文件", 
-                       target_level, result.size());
-        if (!result.empty()) {
-          std::string files_str;
-          for (const auto& file : result) {
-            files_str += file + " ";
-          }
-          ROCKS_LOG_DEBUG(info_log_, "预测的目标层文件: %s", files_str.c_str());
-        }
-      }
-      return result;
+      ROCKS_LOG_DEBUG(info_log_, "预测的目标层文件: %s", files_str.c_str());
     }
   }
 
-  // 如果没有Picker或源文件为空,使用原有逻辑
-  // ... 原有的目标层文件预测逻辑 ...
   return result;
 }
 
@@ -411,51 +426,44 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
                    level, vstorage_->LevelFiles(level).size());
   }
 
-  // 使用Picker的公共方法进行预测
-  if (picker_ && immutable_options_ && mutable_cf_options_) {
-    std::vector<FileMetaData*> predicted_files;
-    
-    if (immutable_options_->compaction_pri == kRoundRobin &&
-        immutable_options_->compaction_style == kCompactionStyleLevel) {
-      // RR策略下使用RoundRobinPick
-      predicted_files = CompactionPicker::SimulateRoundRobinPick(
-          level, const_cast<VersionStorageInfo*>(vstorage_), *immutable_options_);
-    } else {
-      // 其他策略使用CleanCutExpansion
-      int next_index = vstorage_->NextCompactionIndex(level);
-      if (next_index < 0) {
-        return result;
-      }
-      FileMetaData* start_file = vstorage_->LevelFiles(level)[next_index];
-      predicted_files = CompactionPicker::SimulateCleanCutExpansion(
-          level,
-          const_cast<VersionStorageInfo*>(vstorage_),
-          vstorage_->InternalComparator(),
-          *immutable_options_,
-          start_file);
-    }
-
-    // 转换预测结果为字符串集合
-    for (auto* f : predicted_files) {
-      result.insert(std::to_string(f->fd.GetNumber()));
-    }
-
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "使用Picker预测: 层级 %d 预测了 %zu 个文件", 
-                     level, result.size());
-      if (!result.empty()) {
-        std::string files_str;
-        for (const auto& file : result) {
-          files_str += file + " ";
+  // 使用 picker 的 PickCompaction 方法进行预测
+  Compaction* c = picker_->PickCompaction(
+      "", *mutable_cf_options_, MutableDBOptions(),
+      std::vector<SequenceNumber>(), nullptr,
+      const_cast<VersionStorageInfo*>(vstorage_),
+      nullptr);
+      
+  if (c != nullptr) {
+    // 收集预测的文件
+    for (const auto& input : *c->inputs()) {
+      if (input.level == level) {
+        for (const auto* f : input.files) {
+          result.insert(std::to_string(f->fd.GetNumber()));
+          if (info_log_ != nullptr) {
+            ROCKS_LOG_INFO(info_log_, "预测文件: L%d 文件 %lu [%s .. %s] (大小: %llu)", 
+                          level, f->fd.GetNumber(),
+                          ToReadableString(f->smallest.user_key()).c_str(),
+                          ToReadableString(f->largest.user_key()).c_str(),
+                          static_cast<unsigned long long>(f->fd.file_size));
+          }
         }
-        ROCKS_LOG_DEBUG(info_log_, "预测的文件: %s", files_str.c_str());
       }
     }
-    return result;
+    delete c;
   }
 
-  // 如果没有Picker或options,使用原有逻辑
-  // ... 原有的clean cut逻辑 ...
+  if (info_log_ != nullptr) {
+    ROCKS_LOG_INFO(info_log_, "使用Picker预测: 层级 %d 预测了 %zu 个文件", 
+                   level, result.size());
+    if (!result.empty()) {
+      std::string files_str;
+      for (const auto& file : result) {
+        files_str += file + " ";
+      }
+      ROCKS_LOG_DEBUG(info_log_, "预测的文件: %s", files_str.c_str());
+    }
+  }
+
   return result;
 }
 

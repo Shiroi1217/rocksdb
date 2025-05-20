@@ -236,28 +236,6 @@ class CompactionPicker {
 
   const InternalKeyComparator* icmp() const { return icmp_; }
 
-  // 新增: 用于预测的公共方法
-  static std::vector<FileMetaData*> SimulateRoundRobinPick(
-      int level,
-      VersionStorageInfo* vstorage,
-      const ImmutableOptions& ioptions);
-
-  static std::vector<FileMetaData*> SimulateCleanCutExpansion(
-      int level,
-      VersionStorageInfo* vstorage,
-      const InternalKeyComparator* icmp,
-      const ImmutableOptions& ioptions,
-      FileMetaData* start_file);
-
-  static std::vector<FileMetaData*> SimulateTargetLevelPick(
-      int source_level,
-      int target_level,
-      VersionStorageInfo* vstorage,
-      const InternalKeyComparator* icmp,
-      const ImmutableOptions& ioptions,
-      const MutableCFOptions& mutable_cf_options,
-      const std::vector<FileMetaData*>& source_files);
-
  protected:
   const ImmutableOptions& ioptions_;
 
