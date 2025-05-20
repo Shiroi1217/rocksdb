@@ -58,7 +58,6 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
     }
   }
   std::set<std::string> result;
-  std::set<std::string> predicted_files; // 新增：全局已预测SST文件集合
   if (levels_to_check.empty()) {
     if (info_log_ != nullptr) {
       ROCKS_LOG_INFO(info_log_, "没有层级需要进行compaction预测");
@@ -82,14 +81,13 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
         ROCKS_LOG_DEBUG(info_log_, "预测的L1文件: %s", files_str.c_str());
       }
       result.insert(l1_files.begin(), l1_files.end());
-      predicted_files.insert(l1_files.begin(), l1_files.end());
     } else {
       if (info_log_ != nullptr) {
         ROCKS_LOG_INFO(info_log_, "没有找到L0到L1 compaction的目标文件");
       }
     }
   }
-  // 只对1层及以上做"排除已被预测SST文件"逻辑
+  // 只对1层及以上做本层排除逻辑
   for (int level : levels_to_check) {
     if (level == 0 && vstorage_->CompactionScore(0) > 1.0) {
       continue;
@@ -98,17 +96,12 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
       ROCKS_LOG_INFO(info_log_, "开始预测层级 %d 的compaction，当前分数: %.2f", 
                      level, vstorage_->CompactionScore(level));
     }
+    // 本层预测文件集合
     std::set<std::string> level_files = GetLevelCompactionFiles(level);
-    // 新增：排除已被低层预测的SST文件
-    std::set<std::string> filtered_files;
-    for (const auto& file : level_files) {
-      if (predicted_files.count(file) == 0) {
-        filtered_files.insert(file);
-      }
-    }
+    // 只排除本层已被选中的文件
+    std::set<std::string> filtered_files = level_files;
     if (!filtered_files.empty()) {
       result.insert(filtered_files.begin(), filtered_files.end());
-      predicted_files.insert(filtered_files.begin(), filtered_files.end());
     }
     // 预测下一层的文件
     if (level + 1 < vstorage_->num_levels()) {
@@ -128,17 +121,7 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
           }
           ROCKS_LOG_DEBUG(info_log_, "预测的层级 %d 文件: %s", level + 1, files_str.c_str());
         }
-        // 目标层文件也要排除已被预测的
-        std::set<std::string> filtered_target_files;
-        for (const auto& file : target_files) {
-          if (predicted_files.count(file) == 0) {
-            filtered_target_files.insert(file);
-          }
-        }
-        if (!filtered_target_files.empty()) {
-          result.insert(filtered_target_files.begin(), filtered_target_files.end());
-          predicted_files.insert(filtered_target_files.begin(), filtered_target_files.end());
-        }
+        result.insert(target_files.begin(), target_files.end());
       } else {
         if (info_log_ != nullptr) {
           ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 到 %d 的compaction目标文件", 
@@ -146,7 +129,7 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
         }
       }
     }
-    // 计算新的score、尝试多轮预测等，均用filtered_files和predicted_files
+    // 计算新的score、尝试多轮预测等，均用filtered_files
     double new_score = CalculateNewScore(level, filtered_files);
     if (info_log_ != nullptr) {
       ROCKS_LOG_INFO(info_log_, "层级 %d 在预测compaction后的新分数: %.2f", 
@@ -160,13 +143,8 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
                        level, new_score, attempt + 1);
       }
       std::set<std::string> additional_files = GetNextCompactionFilesFrom(level, excluded_files);
-      // 新增：排除已被预测的
-      std::set<std::string> filtered_additional_files;
-      for (const auto& file : additional_files) {
-        if (predicted_files.count(file) == 0) {
-          filtered_additional_files.insert(file);
-        }
-      }
+      // 只排除本层已被选中的文件
+      std::set<std::string> filtered_additional_files = additional_files;
       if (filtered_additional_files.empty()) {
         if (info_log_ != nullptr) {
           ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 的更多文件", level);
@@ -183,22 +161,13 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
         ROCKS_LOG_DEBUG(info_log_, "额外预测的文件: %s", files_str.c_str());
       }
       result.insert(filtered_additional_files.begin(), filtered_additional_files.end());
-      predicted_files.insert(filtered_additional_files.begin(), filtered_additional_files.end());
       excluded_files.insert(filtered_additional_files.begin(), filtered_additional_files.end());
       // 预测下一层的文件
       if (level + 1 < vstorage_->num_levels()) {
         std::set<std::string> additional_target_files = GetTargetLevelFilesForCompaction(
             level, level + 1, filtered_additional_files);
-        // 目标层文件也要排除已被预测的
-        std::set<std::string> filtered_additional_target_files;
-        for (const auto& file : additional_target_files) {
-          if (predicted_files.count(file) == 0) {
-            filtered_additional_target_files.insert(file);
-          }
-        }
-        if (!filtered_additional_target_files.empty()) {
-          result.insert(filtered_additional_target_files.begin(), filtered_additional_target_files.end());
-          predicted_files.insert(filtered_additional_target_files.begin(), filtered_additional_target_files.end());
+        if (!additional_target_files.empty()) {
+          result.insert(additional_target_files.begin(), additional_target_files.end());
         }
       }
       new_score = CalculateNewScore(level, excluded_files);
@@ -208,9 +177,6 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
       }
       attempt++;
     }
-  }
-  for (const auto& file : result) {
-    predicted_files_[file]++;
   }
   if (info_log_ != nullptr) {
     if (!result.empty()) {
