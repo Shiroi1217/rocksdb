@@ -1269,26 +1269,36 @@ std::vector<FileMetaData*> CompactionPicker::SimulateRoundRobinPick(
   // 获取下一个要处理的文件索引
   int start_index = vstorage->NextCompactionIndex(level);
   if (start_index < 0) {
+    ROCKS_LOG_INFO(ioptions.logger, "SimulateRoundRobinPick: 层级 %d 没有找到下一个压缩索引", level);
     return {};
   }
+
+  ROCKS_LOG_INFO(ioptions.logger, "SimulateRoundRobinPick: 层级 %d 起始文件索引: %d", level, start_index);
 
   // 使用picker的GetLevelCompactionFiles逻辑
   CompactionInputFiles inputs;
   inputs.level = level;
-  inputs.files.push_back(vstorage->LevelFiles(level)[start_index]);
+  const auto& level_files = vstorage->LevelFiles(level);
+  if (start_index >= static_cast<int>(level_files.size())) {
+    ROCKS_LOG_INFO(ioptions.logger, "SimulateRoundRobinPick: 层级 %d 起始索引 %d 超出文件数量 %zu", 
+                   level, start_index, level_files.size());
+    return {};
+  }
+  
+  inputs.files.push_back(level_files[start_index]);
+  ROCKS_LOG_INFO(ioptions.logger, "SimulateRoundRobinPick: 添加起始文件 %lu", 
+                 level_files[start_index]->fd.GetNumber());
   
   // 使用picker的ExpandInputsToCleanCut逻辑
   if (!picker.ExpandInputsToCleanCut("", vstorage, &inputs)) {
+    ROCKS_LOG_INFO(ioptions.logger, "SimulateRoundRobinPick: 层级 %d ExpandInputsToCleanCut 失败", level);
     return {};
   }
 
-  // 使用picker的SetupOtherInputs逻辑来确保选择正确的文件
-  CompactionInputFiles output_level_inputs;
-  output_level_inputs.level = level + 1;
-  int parent_index = -1;
-  if (!picker.SetupOtherInputs("", mutable_cf_options, vstorage,
-                              &inputs, &output_level_inputs, &parent_index, -1)) {
-    return {};
+  ROCKS_LOG_INFO(ioptions.logger, "SimulateRoundRobinPick: 层级 %d 扩展后文件数: %zu", 
+                 level, inputs.files.size());
+  for (const auto* f : inputs.files) {
+    ROCKS_LOG_INFO(ioptions.logger, "SimulateRoundRobinPick: 选择文件 %lu", f->fd.GetNumber());
   }
 
   return inputs.files;
