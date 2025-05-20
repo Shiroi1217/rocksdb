@@ -1261,7 +1261,6 @@ bool CompactionPicker::GetOverlappingL0Files(
 // 实现用于预测的静态方法
 std::vector<FileMetaData*> CompactionPicker::SimulateRoundRobinPick(
     int level, VersionStorageInfo* vstorage,
-    const MutableCFOptions& mutable_cf_options,
     const ImmutableOptions& ioptions) {
   // 创建一个临时的LevelCompactionPicker实例来复用其逻辑
   LevelCompactionPicker picker(ioptions, vstorage->InternalComparator());

@@ -240,7 +240,6 @@ class CompactionPicker {
   static std::vector<FileMetaData*> SimulateRoundRobinPick(
       int level,
       VersionStorageInfo* vstorage,
-      const MutableCFOptions& mutable_cf_options,
       const ImmutableOptions& ioptions);
 
   static std::vector<FileMetaData*> SimulateCleanCutExpansion(

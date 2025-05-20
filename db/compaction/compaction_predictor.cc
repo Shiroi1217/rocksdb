@@ -419,10 +419,7 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
         immutable_options_->compaction_style == kCompactionStyleLevel) {
       // RR策略下使用RoundRobinPick
       predicted_files = CompactionPicker::SimulateRoundRobinPick(
-          level, 
-          const_cast<VersionStorageInfo*>(vstorage_),
-          *mutable_cf_options_,
-          *immutable_options_);
+          level, const_cast<VersionStorageInfo*>(vstorage_), *immutable_options_);
     } else {
       // 其他策略使用CleanCutExpansion
       int next_index = vstorage_->NextCompactionIndex(level);
