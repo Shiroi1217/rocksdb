@@ -1257,4 +1257,75 @@ bool CompactionPicker::GetOverlappingL0Files(
   return true;
 }
 
+// 实现用于预测的静态方法
+std::vector<FileMetaData*> CompactionPicker::SimulateRoundRobinPick(
+    int level, VersionStorageInfo* vstorage,
+    const MutableCFOptions& mutable_cf_options,
+    const ImmutableOptions& ioptions) {
+  // 创建一个临时的CompactionPicker实例来复用其逻辑
+  CompactionPicker picker(ioptions, vstorage->InternalComparator());
+  
+  // 获取下一个要处理的文件索引
+  int start_index = vstorage->NextCompactionIndex(level);
+  if (start_index < 0) {
+    return {};
+  }
+
+  // 使用picker的GetLevelCompactionFiles逻辑
+  CompactionInputFiles inputs;
+  inputs.level = level;
+  inputs.files.push_back(vstorage->LevelFiles(level)[start_index]);
+  
+  // 使用picker的ExpandInputsToCleanCut逻辑
+  if (!picker.ExpandInputsToCleanCut("", vstorage, &inputs)) {
+    return {};
+  }
+
+  return inputs.files;
+}
+
+std::vector<FileMetaData*> CompactionPicker::SimulateCleanCutExpansion(
+    int level, VersionStorageInfo* vstorage,
+    const InternalKeyComparator* icmp,
+    FileMetaData* start_file) {
+  // 创建一个临时的CompactionPicker实例来复用其逻辑
+  CompactionPicker picker(vstorage->GetImmutableOptions(), icmp);
+  
+  CompactionInputFiles inputs;
+  inputs.level = level;
+  inputs.files.push_back(start_file);
+  
+  // 使用picker的ExpandInputsToCleanCut逻辑
+  if (!picker.ExpandInputsToCleanCut("", vstorage, &inputs)) {
+    return {};
+  }
+
+  return inputs.files;
+}
+
+std::vector<FileMetaData*> CompactionPicker::SimulateTargetLevelPick(
+    int source_level, int target_level,
+    VersionStorageInfo* vstorage,
+    const InternalKeyComparator* icmp,
+    const std::vector<FileMetaData*>& source_files) {
+  // 创建一个临时的CompactionPicker实例来复用其逻辑
+  CompactionPicker picker(vstorage->GetImmutableOptions(), icmp);
+  
+  CompactionInputFiles inputs;
+  inputs.level = source_level;
+  inputs.files = source_files;
+  
+  CompactionInputFiles output_level_inputs;
+  output_level_inputs.level = target_level;
+  
+  int parent_index = -1;
+  // 使用picker的SetupOtherInputs逻辑
+  if (!picker.SetupOtherInputs("", vstorage->GetMutableCFOptions(), vstorage,
+                              &inputs, &output_level_inputs, &parent_index, -1)) {
+    return {};
+  }
+
+  return output_level_inputs.files;
+}
+
 }  // namespace ROCKSDB_NAMESPACE
