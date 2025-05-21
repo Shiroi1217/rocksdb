@@ -8,7 +8,6 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/compaction/compaction_picker.h"
-#include "db/compaction/compaction_picker_level.h"
 
 #include <cinttypes>
 #include <limits>

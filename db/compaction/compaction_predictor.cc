@@ -7,31 +7,9 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-CompactionPredictor::CompactionPredictor(
-    const VersionStorageInfo* vstorage,
-    const ImmutableOptions* immutable_options,
-    const MutableCFOptions* mutable_cf_options,
-    Logger* info_log)
-    : vstorage_(vstorage),
-      immutable_options_(immutable_options),
-      mutable_cf_options_(mutable_cf_options),
-      info_log_(info_log) {
-  picker_ = std::make_unique<LevelCompactionPicker>(
-      *immutable_options_, vstorage->InternalComparator());
-}
-
-CompactionPredictor::CompactionPredictor(
-    const VersionStorageInfo* vstorage,
-    CompactionPicker* picker,
-    const ImmutableOptions* immutable_options,
-    const MutableCFOptions* mutable_cf_options,
-    Logger* info_log)
-    : vstorage_(vstorage),
-      immutable_options_(immutable_options),
-      mutable_cf_options_(mutable_cf_options),
-      info_log_(info_log) {
-  picker_ = std::unique_ptr<CompactionPicker>(picker);
-}
+// 由于构造函数在头文件中已定义为内联函数，这里删除构造函数定义
+// CompactionPredictor::CompactionPredictor(const VersionStorageInfo* vstorage)
+//     : vstorage_(vstorage) {}
 
 // 辅助函数：将Slice转为可读字符串（优先ASCII，否则16进制）
 static std::string ToReadableString(const Slice& s) {
@@ -151,54 +129,54 @@ std::set<std::string> CompactionPredictor::PredictCompactionFiles() {
         }
       }
     }
-    // 计算新的score、尝试多轮预测等，均用filtered_files
-    double new_score = CalculateNewScore(level, filtered_files);
-    if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "层级 %d 在预测compaction后的新分数: %.2f", 
-                     level, new_score);
-    }
-    int attempt = 1;
-    std::set<std::string> excluded_files = filtered_files;
-    while (new_score > 1.0 && attempt < 3) {
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "层级 %d 的新分数 %.2f 仍然 > 1.0，尝试预测更多文件（尝试 %d/3）", 
-                       level, new_score, attempt + 1);
-      }
-      std::set<std::string> additional_files = GetNextCompactionFilesFrom(level, excluded_files);
-      // 只排除本层已被选中的文件
-      std::set<std::string> filtered_additional_files = additional_files;
-      if (filtered_additional_files.empty()) {
-        if (info_log_ != nullptr) {
-          ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 的更多文件", level);
-        }
-        break;
-      }
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "为层级 %d 额外预测了 %zu 个文件", 
-                       level, filtered_additional_files.size());
-        std::string files_str;
-        for (const auto& file : filtered_additional_files) {
-          files_str += file + " ";
-        }
-        ROCKS_LOG_DEBUG(info_log_, "额外预测的文件: %s", files_str.c_str());
-      }
-      result.insert(filtered_additional_files.begin(), filtered_additional_files.end());
-      excluded_files.insert(filtered_additional_files.begin(), filtered_additional_files.end());
-      // 预测下一层的文件
-      if (level + 1 < vstorage_->num_levels()) {
-        std::set<std::string> additional_target_files = GetTargetLevelFilesForCompaction(
-            level, level + 1, filtered_additional_files);
-        if (!additional_target_files.empty()) {
-          result.insert(additional_target_files.begin(), additional_target_files.end());
-        }
-      }
-      new_score = CalculateNewScore(level, excluded_files);
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "层级 %d 在额外预测compaction后的新分数: %.2f", 
-                       level, new_score);
-      }
-      attempt++;
-    }
+    // // 计算新的score、尝试多轮预测等，均用filtered_files
+    // double new_score = CalculateNewScore(level, filtered_files);
+    // if (info_log_ != nullptr) {
+    //   ROCKS_LOG_INFO(info_log_, "层级 %d 在预测compaction后的新分数: %.2f", 
+    //                  level, new_score);
+    // }
+    // int attempt = 1;
+    // std::set<std::string> excluded_files = filtered_files;
+    // while (new_score > 1.0 && attempt < 3) {
+    //   if (info_log_ != nullptr) {
+    //     ROCKS_LOG_INFO(info_log_, "层级 %d 的新分数 %.2f 仍然 > 1.0，尝试预测更多文件（尝试 %d/3）", 
+    //                    level, new_score, attempt + 1);
+    //   }
+    //   std::set<std::string> additional_files = GetNextCompactionFilesFrom(level, excluded_files);
+    //   // 只排除本层已被选中的文件
+    //   std::set<std::string> filtered_additional_files = additional_files;
+    //   if (filtered_additional_files.empty()) {
+    //     if (info_log_ != nullptr) {
+    //       ROCKS_LOG_INFO(info_log_, "没有找到层级 %d 的更多文件", level);
+    //     }
+    //     break;
+    //   }
+    //   if (info_log_ != nullptr) {
+    //     ROCKS_LOG_INFO(info_log_, "为层级 %d 额外预测了 %zu 个文件", 
+    //                    level, filtered_additional_files.size());
+    //     std::string files_str;
+    //     for (const auto& file : filtered_additional_files) {
+    //       files_str += file + " ";
+    //     }
+    //     ROCKS_LOG_DEBUG(info_log_, "额外预测的文件: %s", files_str.c_str());
+    //   }
+    //   result.insert(filtered_additional_files.begin(), filtered_additional_files.end());
+    //   excluded_files.insert(filtered_additional_files.begin(), filtered_additional_files.end());
+    //   // 预测下一层的文件
+    //   if (level + 1 < vstorage_->num_levels()) {
+    //     std::set<std::string> additional_target_files = GetTargetLevelFilesForCompaction(
+    //         level, level + 1, filtered_additional_files);
+    //     if (!additional_target_files.empty()) {
+    //       result.insert(additional_target_files.begin(), additional_target_files.end());
+    //     }
+    //   }
+    //   new_score = CalculateNewScore(level, excluded_files);
+    //   if (info_log_ != nullptr) {
+    //     ROCKS_LOG_INFO(info_log_, "层级 %d 在额外预测compaction后的新分数: %.2f", 
+    //                    level, new_score);
+    //   }
+    //   attempt++;
+    // }
   }
   if (info_log_ != nullptr) {
     if (!result.empty()) {
@@ -328,36 +306,74 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
     }
     return result;
   }
-
-  // 使用 picker 的 PickCompaction 方法进行预测
-  Compaction* c = picker_->PickCompaction(
-      "", *mutable_cf_options_, MutableDBOptions(),
-      std::vector<SequenceNumber>(), nullptr,
-      const_cast<VersionStorageInfo*>(vstorage_),
-      nullptr);
-      
-  if (c != nullptr) {
-    // 收集预测的目标层文件
-    for (const auto& input : *c->inputs()) {
-      if (input.level == target_level) {
-        for (const auto* f : input.files) {
-          result.insert(std::to_string(f->fd.GetNumber()));
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "预测目标层文件: L%d 文件 %lu [%s .. %s] (大小: %llu)", 
-                          target_level, f->fd.GetNumber(),
-                          ToReadableString(f->smallest.user_key()).c_str(),
-                          ToReadableString(f->largest.user_key()).c_str(),
-                          static_cast<unsigned long long>(f->fd.file_size));
+  
+  if (info_log_ != nullptr) {
+    ROCKS_LOG_INFO(info_log_, "GetTargetLevelFilesForCompaction: 源层 %d 有 %zu 个文件，查找与之重叠的目标层 %d 文件", 
+                   source_level, source_files.size(), target_level);
+  }
+  
+  // 先找到源文件的键范围
+  Slice smallest_key, largest_key;
+  bool first_key = true;
+  
+  // 从源文件名映射到FileMetaData
+  for (const auto& source_file_str : source_files) {
+    for (FileMetaData* f : vstorage_->LevelFiles(source_level)) {
+      if (std::to_string(f->fd.GetNumber()) == source_file_str) {
+        if (first_key) {
+          smallest_key = f->smallest.user_key();
+          largest_key = f->largest.user_key();
+          first_key = false;
+        } else {
+          if (vstorage_->InternalComparator()->user_comparator()->Compare(
+              f->smallest.user_key(), smallest_key) < 0) {
+            smallest_key = f->smallest.user_key();
+          }
+          if (vstorage_->InternalComparator()->user_comparator()->Compare(
+              f->largest.user_key(), largest_key) > 0) {
+            largest_key = f->largest.user_key();
           }
         }
+        break;
       }
     }
-    delete c;
   }
-
+  
+  if (first_key) {
+    if (info_log_ != nullptr) {
+      ROCKS_LOG_INFO(info_log_, "GetTargetLevelFilesForCompaction: 无法确定源文件的键范围");
+    }
+    return result;
+  }
+  
   if (info_log_ != nullptr) {
-    ROCKS_LOG_INFO(info_log_, "使用Picker预测: 目标层 %d 预测了 %zu 个文件", 
-                   target_level, result.size());
+    ROCKS_LOG_INFO(info_log_, "源文件的综合键范围: [%s, %s]", 
+                   ToReadableString(smallest_key).c_str(),
+                   ToReadableString(largest_key).c_str());
+  }
+  
+  // 查找与源文件键范围重叠的目标层文件
+  const std::vector<FileMetaData*>& target_files = vstorage_->LevelFiles(target_level);
+  for (FileMetaData* f : target_files) {
+    if (f->being_compacted) continue;
+    if (vstorage_->InternalComparator()->user_comparator()->Compare(
+          f->largest.user_key(), smallest_key) >= 0 &&
+        vstorage_->InternalComparator()->user_comparator()->Compare(
+          f->smallest.user_key(), largest_key) <= 0) {
+      // 文件键范围与源文件重叠
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "找到与源文件重叠的目标层文件: %s，键范围: [%s, %s]", 
+                       std::to_string(f->fd.GetNumber()).c_str(),
+                       ToReadableString(f->smallest.user_key()).c_str(),
+                       ToReadableString(f->largest.user_key()).c_str());
+      }
+      result.insert(std::to_string(f->fd.GetNumber()));
+    }
+  }
+  
+  if (info_log_ != nullptr) {
+    ROCKS_LOG_INFO(info_log_, "GetTargetLevelFilesForCompaction: 找到 %zu 个目标层文件与源文件重叠", 
+                   result.size());
     if (!result.empty()) {
       std::string files_str;
       for (const auto& file : result) {
@@ -366,7 +382,7 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
       ROCKS_LOG_DEBUG(info_log_, "预测的目标层文件: %s", files_str.c_str());
     }
   }
-
+  
   return result;
 }
 
@@ -420,50 +436,121 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
     }
     return result;
   }
-
   if (info_log_ != nullptr) {
     ROCKS_LOG_INFO(info_log_, "GetLevelCompactionFiles: 层级 %d 总文件数: %zu", 
                    level, vstorage_->LevelFiles(level).size());
   }
 
-  // 使用 picker 的 PickCompaction 方法进行预测
-  Compaction* c = picker_->PickCompaction(
-      "", *mutable_cf_options_, MutableDBOptions(),
-      std::vector<SequenceNumber>(), nullptr,
-      const_cast<VersionStorageInfo*>(vstorage_),
-      nullptr);
-      
-  if (c != nullptr) {
-    // 收集预测的文件
-    for (const auto& input : *c->inputs()) {
-      if (input.level == level) {
-        for (const auto* f : input.files) {
-          result.insert(std::to_string(f->fd.GetNumber()));
-          if (info_log_ != nullptr) {
-            ROCKS_LOG_INFO(info_log_, "预测文件: L%d 文件 %lu [%s .. %s] (大小: %llu)", 
-                          level, f->fd.GetNumber(),
-                          ToReadableString(f->smallest.user_key()).c_str(),
-                          ToReadableString(f->largest.user_key()).c_str(),
-                          static_cast<unsigned long long>(f->fd.file_size));
-          }
+  // RR策略下模拟多轮游标推进+being_compacted
+  if (immutable_options_ && mutable_cf_options_ &&
+      immutable_options_->compaction_pri == kRoundRobin &&
+      immutable_options_->compaction_style == kCompactionStyleLevel) {
+    const auto& files = vstorage_->LevelFiles(level);
+    int n = static_cast<int>(files.size());
+    if (n == 0) return result;
+    std::vector<bool> temp_being_compacted(n, false);
+    int cursor = vstorage_->NextCompactionIndex(level);
+    double score = vstorage_->CompactionScore(level);
+    uint64_t max_bytes = mutable_cf_options_->max_compaction_bytes;
+    int attempt = 0;
+    while (score > 1.0 && cursor < n && attempt < 3) {
+      // 找到第一个未being_compacted的文件
+      while (cursor < n && temp_being_compacted[cursor]) cursor++;
+      if (cursor >= n) break;
+      // 批量选取一组连续无重叠文件
+      uint64_t total_size = 0;
+      int start = cursor, end = cursor;
+      for (; end < n; ++end) {
+        if (temp_being_compacted[end]) break;
+        if (end > start) {
+          if (vstorage_->InternalComparator()->user_comparator()->Compare(
+                files[end-1]->largest.user_key(), files[end]->smallest.user_key()) >= 0) break;
+        }
+        if (total_size + files[end]->fd.file_size > max_bytes) break;
+        total_size += files[end]->fd.file_size;
+      }
+      // 标记这些文件为being_compacted
+      for (int i = start; i < end; ++i) {
+        temp_being_compacted[i] = true;
+        result.insert(std::to_string(files[i]->fd.GetNumber()));
+      }
+      cursor = end;
+      // 重新计算score（只统计未被预测的文件）
+      uint64_t remain_size = 0;
+      for (int i = 0; i < n; ++i) {
+        if (!temp_being_compacted[i]) remain_size += files[i]->fd.file_size;
+      }
+      uint64_t level_limit = vstorage_->MaxBytesForLevel(level);
+      score = level_limit ? double(remain_size) / double(level_limit) : 0.0;
+      attempt++;
+    }
+    if (info_log_ != nullptr) {
+      ROCKS_LOG_INFO(info_log_, "[RR多轮预测] 层级 %d 预测了 %zu 个文件，尝试次数: %d", level, result.size(), attempt);
+    }
+    return result;
+  }
+
+  // 原有clean cut递归扩展重叠文件，直到没有新文件加入
+  int next_index = vstorage_->NextCompactionIndex(level);
+  if (next_index < 0) {
+    return result;
+  }
+  FileMetaData* start_file = vstorage_->LevelFiles(level)[next_index];
+  if (info_log_ != nullptr) {
+    ROCKS_LOG_INFO(info_log_, "层级 %d 的起始文件: %s，键范围: [%s, %s]", 
+                   level, 
+                   std::to_string(start_file->fd.GetNumber()).c_str(),
+                   ToReadableString(start_file->smallest.user_key()).c_str(),
+                   ToReadableString(start_file->largest.user_key()).c_str());
+  }
+  std::set<FileMetaData*> current_set, last_set;
+  current_set.insert(start_file);
+  do {
+    last_set = current_set;
+    Slice min_key, max_key;
+    bool first = true;
+    for (auto* f : current_set) {
+      if (first) {
+        min_key = f->smallest.user_key();
+        max_key = f->largest.user_key();
+        first = false;
+      } else {
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(f->smallest.user_key(), min_key) < 0) {
+          min_key = f->smallest.user_key();
+        }
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(f->largest.user_key(), max_key) > 0) {
+          max_key = f->largest.user_key();
         }
       }
     }
-    delete c;
+    for (FileMetaData* f : vstorage_->LevelFiles(level)) {
+      if (f->being_compacted) continue;
+      if (current_set.count(f)) continue;
+      if (vstorage_->InternalComparator()->user_comparator()->Compare(f->largest.user_key(), min_key) >= 0 &&
+          vstorage_->InternalComparator()->user_comparator()->Compare(f->smallest.user_key(), max_key) <= 0) {
+        current_set.insert(f);
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "clean cut扩展: 加入重叠文件: %s，键范围: [%s, %s]", 
+                         std::to_string(f->fd.GetNumber()).c_str(),
+                         ToReadableString(f->smallest.user_key()).c_str(),
+                         ToReadableString(f->largest.user_key()).c_str());
+        }
+      }
+    }
+  } while (current_set.size() > last_set.size());
+  for (auto* f : current_set) {
+    result.insert(std::to_string(f->fd.GetNumber()));
   }
-
   if (info_log_ != nullptr) {
-    ROCKS_LOG_INFO(info_log_, "使用Picker预测: 层级 %d 预测了 %zu 个文件", 
-                   level, result.size());
+    ROCKS_LOG_INFO(info_log_, "层级 %d clean cut后预测了 %zu 个文件", level, result.size());
     if (!result.empty()) {
       std::string files_str;
       for (const auto& file : result) {
         files_str += file + " ";
       }
-      ROCKS_LOG_DEBUG(info_log_, "预测的文件: %s", files_str.c_str());
+      ROCKS_LOG_DEBUG(info_log_, "clean cut预测的文件: %s", files_str.c_str());
     }
   }
-
   return result;
 }
 
