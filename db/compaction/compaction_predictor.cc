@@ -223,6 +223,7 @@ std::set<std::string> CompactionPredictor::GetPossibleTargetFilesForL0Compaction
   bool first_key = true;
   
   for (FileMetaData* f : l0_files) {
+    if (f->being_compacted) continue;  // 跳过正在compaction的文件
     if (first_key) {
       smallest_key = f->smallest.user_key();
       largest_key = f->largest.user_key();
@@ -255,6 +256,13 @@ std::set<std::string> CompactionPredictor::GetPossibleTargetFilesForL0Compaction
   // 查找与L0键范围重叠的L1文件
   const std::vector<FileMetaData*>& l1_files = vstorage_->LevelFiles(1);
   for (FileMetaData* f : l1_files) {
+    if (f->being_compacted) {
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "跳过正在compaction的L1文件: %s", 
+                       std::to_string(f->fd.GetNumber()).c_str());
+      }
+      continue;
+    }
     // 使用GetRangeOverlap方法或直接检查键范围重叠
     if (vstorage_->InternalComparator()->user_comparator()->Compare(
           f->largest.user_key(), smallest_key) >= 0 &&
@@ -315,6 +323,7 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
   // 先找到源文件的键范围
   Slice smallest_key, largest_key;
   bool first_key = true;
+  uint64_t source_total_size = 0;
   
   // 从源文件名映射到FileMetaData
   for (const auto& source_file_str : source_files) {
@@ -334,6 +343,7 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
             largest_key = f->largest.user_key();
           }
         }
+        source_total_size += f->fd.file_size;
         break;
       }
     }
@@ -347,33 +357,66 @@ std::set<std::string> CompactionPredictor::GetTargetLevelFilesForCompaction(
   }
   
   if (info_log_ != nullptr) {
-    ROCKS_LOG_INFO(info_log_, "源文件的综合键范围: [%s, %s]", 
+    ROCKS_LOG_INFO(info_log_, "源文件的综合键范围: [%s, %s]，总大小: %llu", 
                    ToReadableString(smallest_key).c_str(),
-                   ToReadableString(largest_key).c_str());
+                   ToReadableString(largest_key).c_str(),
+                   static_cast<unsigned long long>(source_total_size));
   }
   
   // 查找与源文件键范围重叠的目标层文件
   const std::vector<FileMetaData*>& target_files = vstorage_->LevelFiles(target_level);
+  uint64_t target_total_size = 0;
+  
   for (FileMetaData* f : target_files) {
-    if (f->being_compacted) continue;
+    if (f->being_compacted) {
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "跳过正在compaction的目标层文件: %s", 
+                       std::to_string(f->fd.GetNumber()).c_str());
+      }
+      continue;
+    }
+
+    // 检查键范围重叠
     if (vstorage_->InternalComparator()->user_comparator()->Compare(
           f->largest.user_key(), smallest_key) >= 0 &&
         vstorage_->InternalComparator()->user_comparator()->Compare(
           f->smallest.user_key(), largest_key) <= 0) {
-      // 文件键范围与源文件重叠
-      if (info_log_ != nullptr) {
-        ROCKS_LOG_INFO(info_log_, "找到与源文件重叠的目标层文件: %s，键范围: [%s, %s]", 
-                       std::to_string(f->fd.GetNumber()).c_str(),
-                       ToReadableString(f->smallest.user_key()).c_str(),
-                       ToReadableString(f->largest.user_key()).c_str());
+      
+      // 检查文件大小限制
+      if (target_total_size + f->fd.file_size > mutable_cf_options_->max_compaction_bytes) {
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "目标层文件 %s 超出大小限制，停止选择", 
+                         std::to_string(f->fd.GetNumber()).c_str());
+        }
+        break;
       }
+
+      // 更新键范围
+      if (vstorage_->InternalComparator()->user_comparator()->Compare(
+            f->smallest.user_key(), smallest_key) < 0) {
+        smallest_key = f->smallest.user_key();
+      }
+      if (vstorage_->InternalComparator()->user_comparator()->Compare(
+            f->largest.user_key(), largest_key) > 0) {
+        largest_key = f->largest.user_key();
+      }
+
       result.insert(std::to_string(f->fd.GetNumber()));
+      target_total_size += f->fd.file_size;
+
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "选择目标层文件 %s，当前总大小: %llu，键范围: [%s, %s]", 
+                       std::to_string(f->fd.GetNumber()).c_str(),
+                       static_cast<unsigned long long>(target_total_size),
+                       ToReadableString(smallest_key).c_str(),
+                       ToReadableString(largest_key).c_str());
+      }
     }
   }
   
   if (info_log_ != nullptr) {
-    ROCKS_LOG_INFO(info_log_, "GetTargetLevelFilesForCompaction: 找到 %zu 个目标层文件与源文件重叠", 
-                   result.size());
+    ROCKS_LOG_INFO(info_log_, "GetTargetLevelFilesForCompaction: 找到 %zu 个目标层文件与源文件重叠，总大小: %llu", 
+                   result.size(), static_cast<unsigned long long>(target_total_size));
     if (!result.empty()) {
       std::string files_str;
       for (const auto& file : result) {
@@ -448,44 +491,195 @@ std::set<std::string> CompactionPredictor::GetLevelCompactionFiles(int level) {
     const auto& files = vstorage_->LevelFiles(level);
     int n = static_cast<int>(files.size());
     if (n == 0) return result;
-    std::vector<bool> temp_being_compacted(n, false);
+
+    // 从游标位置开始
     int cursor = vstorage_->NextCompactionIndex(level);
-    double score = vstorage_->CompactionScore(level);
-    uint64_t max_bytes = mutable_cf_options_->max_compaction_bytes;
-    int attempt = 0;
-    while (score > 1.0 && cursor < n && attempt < 3) {
-      // 找到第一个未being_compacted的文件
-      while (cursor < n && temp_being_compacted[cursor]) cursor++;
-      if (cursor >= n) break;
-      // 批量选取一组连续无重叠文件
-      uint64_t total_size = 0;
-      int start = cursor, end = cursor;
-      for (; end < n; ++end) {
-        if (temp_being_compacted[end]) break;
-        if (end > start) {
-          if (vstorage_->InternalComparator()->user_comparator()->Compare(
-                files[end-1]->largest.user_key(), files[end]->smallest.user_key()) >= 0) break;
-        }
-        if (total_size + files[end]->fd.file_size > max_bytes) break;
-        total_size += files[end]->fd.file_size;
+    if (cursor < 0 || cursor >= n) {
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "层级 %d 的游标位置 %d 无效", level, cursor);
       }
-      // 标记这些文件为being_compacted
-      for (int i = start; i < end; ++i) {
-        temp_being_compacted[i] = true;
-        result.insert(std::to_string(files[i]->fd.GetNumber()));
-      }
-      cursor = end;
-      // 重新计算score（只统计未被预测的文件）
-      uint64_t remain_size = 0;
-      for (int i = 0; i < n; ++i) {
-        if (!temp_being_compacted[i]) remain_size += files[i]->fd.file_size;
-      }
-      uint64_t level_limit = vstorage_->MaxBytesForLevel(level);
-      score = level_limit ? double(remain_size) / double(level_limit) : 0.0;
-      attempt++;
+      return result;
     }
+
+    // 选择第一个未被compaction的文件作为起始点
+    FileMetaData* start_file = files[cursor];
+    if (start_file->being_compacted) {
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "层级 %d 的起始文件 %s 正在compaction", 
+                       level, std::to_string(start_file->fd.GetNumber()).c_str());
+      }
+      return result;
+    }
+
     if (info_log_ != nullptr) {
-      ROCKS_LOG_INFO(info_log_, "[RR多轮预测] 层级 %d 预测了 %zu 个文件，尝试次数: %d", level, result.size(), attempt);
+      ROCKS_LOG_INFO(info_log_, "层级 %d 的起始文件: %s，键范围: [%s, %s]", 
+                     level, 
+                     std::to_string(start_file->fd.GetNumber()).c_str(),
+                     ToReadableString(start_file->smallest.user_key()).c_str(),
+                     ToReadableString(start_file->largest.user_key()).c_str());
+    }
+
+    // 计算起始文件的键范围
+    Slice smallest_key = start_file->smallest.user_key();
+    Slice largest_key = start_file->largest.user_key();
+    result.insert(std::to_string(start_file->fd.GetNumber()));
+    uint64_t total_size = start_file->fd.file_size;
+
+    // 查找与起始文件键范围重叠的其他文件
+    for (size_t i = cursor + 1; i < files.size(); ++i) {
+      FileMetaData* f = files[i];
+      if (f->being_compacted) {
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "跳过正在compaction的文件: %s", 
+                         std::to_string(f->fd.GetNumber()).c_str());
+        }
+        continue;
+      }
+
+      // 检查键范围重叠
+      if (vstorage_->InternalComparator()->user_comparator()->Compare(
+            f->largest.user_key(), smallest_key) >= 0 &&
+          vstorage_->InternalComparator()->user_comparator()->Compare(
+            f->smallest.user_key(), largest_key) <= 0) {
+        
+        // 检查文件大小限制
+        if (total_size + f->fd.file_size > mutable_cf_options_->max_compaction_bytes) {
+          if (info_log_ != nullptr) {
+            ROCKS_LOG_INFO(info_log_, "文件 %s 超出大小限制，停止选择", 
+                           std::to_string(f->fd.GetNumber()).c_str());
+          }
+          break;
+        }
+
+        // 更新键范围
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(
+              f->smallest.user_key(), smallest_key) < 0) {
+          smallest_key = f->smallest.user_key();
+        }
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(
+              f->largest.user_key(), largest_key) > 0) {
+          largest_key = f->largest.user_key();
+        }
+
+        result.insert(std::to_string(f->fd.GetNumber()));
+        total_size += f->fd.file_size;
+
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "选择文件 %s，当前总大小: %llu，键范围: [%s, %s]", 
+                         std::to_string(f->fd.GetNumber()).c_str(),
+                         static_cast<unsigned long long>(total_size),
+                         ToReadableString(smallest_key).c_str(),
+                         ToReadableString(largest_key).c_str());
+        }
+      }
+    }
+
+    if (info_log_ != nullptr) {
+      ROCKS_LOG_INFO(info_log_, "层级 %d 预测了 %zu 个文件，总大小: %llu", 
+                     level, result.size(), static_cast<unsigned long long>(total_size));
+      if (!result.empty()) {
+        std::string files_str;
+        for (const auto& file : result) {
+          files_str += file + " ";
+        }
+        ROCKS_LOG_DEBUG(info_log_, "预测的文件: %s", files_str.c_str());
+      }
+    }
+    return result;
+  }
+
+  // 检查是否是层级<1且层级间>0.8的情况
+  bool is_special_case = false;
+  for (int upper = 0; upper < level; ++upper) {
+    if (vstorage_->CompactionScore(upper) > 1.0) {
+      bool all_above_08 = true;
+      for (int l = upper + 1; l <= level; ++l) {
+        if (vstorage_->CompactionScore(l) <= 0.8) {
+          all_above_08 = false;
+          break;
+        }
+      }
+      if (all_above_08) {
+        is_special_case = true;
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "检测到层级 %d 是特殊情况（层级<1且层级间>0.8）", level);
+        }
+        break;
+      }
+    }
+  }
+
+  // 对于特殊情况，模拟picker的逻辑选择文件
+  if (is_special_case) {
+    const auto& files = vstorage_->LevelFiles(level);
+    if (files.empty()) return result;
+
+    // 1. 从当前游标位置开始选择文件
+    int next_index = vstorage_->NextCompactionIndex(level);
+    if (next_index < 0 || next_index >= static_cast<int>(files.size())) {
+      return result;
+    }
+
+    // 2. 选择第一个未被compaction的文件作为起始点
+    FileMetaData* start_file = files[next_index];
+    if (start_file->being_compacted) {
+      if (info_log_ != nullptr) {
+        ROCKS_LOG_INFO(info_log_, "起始文件 %s 正在compaction，跳过", 
+                       std::to_string(start_file->fd.GetNumber()).c_str());
+      }
+      return result;
+    }
+
+    // 3. 计算起始文件的键范围
+    Slice smallest_key = start_file->smallest.user_key();
+    Slice largest_key = start_file->largest.user_key();
+    result.insert(std::to_string(start_file->fd.GetNumber()));
+
+    // 4. 查找与起始文件键范围重叠的其他文件
+    uint64_t total_size = start_file->fd.file_size;
+    for (size_t i = next_index + 1; i < files.size(); ++i) {
+      FileMetaData* f = files[i];
+      if (f->being_compacted) continue;
+
+      // 检查键范围重叠
+      if (vstorage_->InternalComparator()->user_comparator()->Compare(
+            f->largest.user_key(), smallest_key) >= 0 &&
+          vstorage_->InternalComparator()->user_comparator()->Compare(
+            f->smallest.user_key(), largest_key) <= 0) {
+        
+        // 检查文件大小限制
+        if (total_size + f->fd.file_size > mutable_cf_options_->max_compaction_bytes) {
+          if (info_log_ != nullptr) {
+            ROCKS_LOG_INFO(info_log_, "文件 %s 超出大小限制，停止选择", 
+                           std::to_string(f->fd.GetNumber()).c_str());
+          }
+          break;
+        }
+
+        // 更新键范围
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(
+              f->smallest.user_key(), smallest_key) < 0) {
+          smallest_key = f->smallest.user_key();
+        }
+        if (vstorage_->InternalComparator()->user_comparator()->Compare(
+              f->largest.user_key(), largest_key) > 0) {
+          largest_key = f->largest.user_key();
+        }
+
+        result.insert(std::to_string(f->fd.GetNumber()));
+        total_size += f->fd.file_size;
+
+        if (info_log_ != nullptr) {
+          ROCKS_LOG_INFO(info_log_, "选择文件 %s，当前总大小: %llu", 
+                         std::to_string(f->fd.GetNumber()).c_str(),
+                         static_cast<unsigned long long>(total_size));
+        }
+      }
+    }
+
+    if (info_log_ != nullptr) {
+      ROCKS_LOG_INFO(info_log_, "特殊情况：层级 %d 预测了 %zu 个文件，总大小: %llu", 
+                     level, result.size(), static_cast<unsigned long long>(total_size));
     }
     return result;
   }
