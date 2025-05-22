@@ -6876,4 +6876,43 @@ void DBImpl::TrackOrUntrackFiles(
   }
 }
 
+    std::shared_ptr<RocksDBCompactionBridge> DBImpl::GetCompactionBridge() {
+    if (!compaction_bridge_) {
+      compaction_bridge_ = std::make_shared<RocksDBCompactionBridgeImpl>(this);
+    }
+    return compaction_bridge_;
+  }
+
+  std::set<std::string> DBImpl::RocksDBCompactionBridgeImpl::GetPredictedCompactionFiles() {
+    std::set<std::string> files;
+    auto cfd = db_->default_cf_handle_ ? db_->default_cf_handle_->cfd() : nullptr;
+    if (cfd && cfd->current()) {
+      VersionStorageInfo* vstorage = cfd->current()->storage_info();
+      if (vstorage) {
+        CompactionPredictor predictor(vstorage);
+        files = predictor.PredictCompactionFiles();
+      }
+    }
+    return files;
+  }
+
+  std::set<std::string> DBImpl::RocksDBCompactionBridgeImpl::GetCompactingFiles() {
+    std::set<std::string> files;
+    auto cfd = db_->default_cf_handle_ ? db_->default_cf_handle_->cfd() : nullptr;
+    if (cfd && cfd->compaction_picker()) {
+      auto* picker = cfd->compaction_picker();
+      if (picker) {
+        for (auto* compaction : *picker->compactions_in_progress()) {
+          for (size_t i = 0; i < compaction->num_input_levels(); ++i) {
+            for (size_t j = 0; j < compaction->num_input_files(i); ++j) {
+              auto* f = compaction->input(i, j);
+              files.insert(std::to_string(f->fd.GetNumber()));
+            }
+          }
+        }
+      }
+    }
+    return files;
+  }
+
 }  // namespace ROCKSDB_NAMESPACE

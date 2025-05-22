@@ -9,6 +9,11 @@
 #include <cinttypes>
 
 #include "db/builder.h"
+#include "plugin/zenfs/fs/rocksdb_bridge.h"
+#include "db/compaction/compaction_predictor.h"
+#include "db/column_family.h"
+#include "db/compaction/compaction_picker.h"
+#include "db/version_set.h"
 #include "db/db_impl/db_impl.h"
 #include "db/error_handler.h"
 #include "db/periodic_task_scheduler.h"
@@ -2685,3 +2690,12 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   return s;
 }
 }  // namespace ROCKSDB_NAMESPACE
+
+#ifdef ZENFS_ENABLED
+  if (db_options.env && db_options.env->IsZenFS()) {
+    auto zenfs = static_cast<ZenFS*>(db_options.env->GetFileSystem().get());
+    if (zenfs) {
+      zenfs->SetCompactionBridge(impl->GetCompactionBridge());
+    }
+  }
+#endif

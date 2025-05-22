@@ -69,6 +69,7 @@
 #include "util/repeatable_thread.h"
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
+#include "plugin/zenfs/fs/rocksdb_bridge.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -3159,6 +3160,23 @@ class DBImpl : public DB {
   // The number of LockWAL called without matching UnlockWAL call.
   // See also lock_wal_write_token_
   uint32_t lock_wal_count_ = 0;
+
+  // 添加ZenFS compaction bridge成员
+  std::shared_ptr<ROCKSDB_NAMESPACE::RocksDBCompactionBridge> compaction_bridge_;
+
+  // 内部实现类
+  class RocksDBCompactionBridgeImpl : public ROCKSDB_NAMESPACE::RocksDBCompactionBridge {
+   public:
+    explicit RocksDBCompactionBridgeImpl(DBImpl* db) : db_(db) {}
+    std::set<std::string> GetPredictedCompactionFiles() override;
+    std::set<std::string> GetCompactingFiles() override;
+    void SetVersionStorageInfo(VersionStorageInfo* vstorage) override {(void)vstorage; }
+    void SetCompactionPicker(CompactionPicker* picker) override { (void)picker; }
+   private:
+    DBImpl* db_;
+  };
+
+  std::shared_ptr<RocksDBCompactionBridge> GetCompactionBridge();
 
 };
 
