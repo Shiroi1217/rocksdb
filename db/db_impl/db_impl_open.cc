@@ -2687,15 +2687,16 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     }
     handles->clear();
   }
+  if (s.ok()) {
+  #ifdef ZENFS_ENABLED
+    if (db_options.env && db_options.env->IsZenFS()) {
+      auto zenfs = static_cast<ZenFS*>(db_options.env->GetFileSystem().get());
+      if (zenfs) {
+        zenfs->SetCompactionBridge(impl->GetCompactionBridge());
+      }
+    }
+  #endif
+  }
   return s;
 }
 }  // namespace ROCKSDB_NAMESPACE
-
-#ifdef ZENFS_ENABLED
-  if (db_options.env && db_options.env->IsZenFS()) {
-    auto zenfs = static_cast<ZenFS*>(db_options.env->GetFileSystem().get());
-    if (zenfs) {
-      zenfs->SetCompactionBridge(impl->GetCompactionBridge());
-    }
-  }
-#endif
