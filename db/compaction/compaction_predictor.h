@@ -6,24 +6,32 @@
 #include <map>
 #include "db/version_set.h"
 #include <vector>
+#include "options/db_options.h"
+#include "logging/logging.h"
 
 namespace ROCKSDB_NAMESPACE {
+
+// Forward declare to avoid include if not necessary for all users of this header
+class MutableCFOptions; 
+class ImmutableCFOptions; // Still might be needed if some internal logic uses it indirectly
 
 // 预测即将到来的压缩中包含的文件
 class CompactionPredictor {
 public:
-  CompactionPredictor() : vstorage_(nullptr), immutable_options_(nullptr), mutable_cf_options_(nullptr), info_log_(nullptr) {}
+  CompactionPredictor() : vstorage_(nullptr), immutable_options_(nullptr), /*immutable_cf_options_(nullptr),*/ mutable_cf_options_(nullptr), info_log_(nullptr) {}
   
   explicit CompactionPredictor(const VersionStorageInfo* vstorage) 
-    : vstorage_(vstorage), predicted_files_(), immutable_options_(nullptr), mutable_cf_options_(nullptr), info_log_(nullptr) {}
+    : vstorage_(vstorage), predicted_files_(), immutable_options_(nullptr), /*immutable_cf_options_(nullptr),*/ mutable_cf_options_(nullptr), info_log_(nullptr) {}
   
-  // 添加新的构造函数，接收options参数和日志
+  // 改回接收 const ImmutableOptions*
   CompactionPredictor(const VersionStorageInfo* vstorage, 
                      const ImmutableOptions* immutable_options,
+                     /*const ImmutableCFOptions* immutable_cf_options,*/
                      const MutableCFOptions* mutable_cf_options,
                      Logger* info_log = nullptr)
     : vstorage_(vstorage), predicted_files_(), 
       immutable_options_(immutable_options), 
+      /*immutable_cf_options_(immutable_cf_options),*/
       mutable_cf_options_(mutable_cf_options),
       info_log_(info_log) {}
   
@@ -102,8 +110,9 @@ private:
   const VersionStorageInfo* vstorage_;
   // 保存当前预测的文件集合及其出现次数
   std::map<std::string, int> predicted_files_;
-  // 添加options成员变量
+  // 改回 const ImmutableOptions*
   const ImmutableOptions* immutable_options_;
+  // const ImmutableCFOptions* immutable_cf_options_;
   const MutableCFOptions* mutable_cf_options_;
   // 日志对象
   Logger* info_log_;

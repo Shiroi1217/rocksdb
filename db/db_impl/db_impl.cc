@@ -4069,7 +4069,7 @@ std::shared_ptr<const SnapshotImpl> DBImpl::GetTimestampedSnapshot(
 }
 
 void DBImpl::ReleaseTimestampedSnapshotsOlderThan(uint64_t ts,
-                                                  size_t* remaining_total_ss) {
+                                                size_t* remaining_total_ss) {
   autovector<std::shared_ptr<const SnapshotImpl>> snapshots_to_release;
   {
     InstrumentedMutexLock lock_guard(&mutex_);
@@ -5226,8 +5226,8 @@ Status DestroyDB(const std::string& dbname, const Options& options,
         } else if (type == kTableFile || type == kWalFile ||
                    type == kBlobFile) {
           del = DeleteUnaccountedDBFile(&soptions, path_to_delete, dbname,
-                                        /*force_bg=*/false,
-                                        /*force_fg=*/false, bucket);
+                                       /*force_bg=*/false,
+                                       /*force_fg=*/false, bucket);
         } else {
           del = env->DeleteFile(path_to_delete);
         }
@@ -5837,7 +5837,7 @@ Status DBImpl::IngestExternalFiles(
                                 io_tracer_);
   }
 
-  // TODO(yanqin) maybe make jobs run in parallel
+  // TODO (yanqin) maybe make jobs run in parallel
   uint64_t start_file_number = next_file_number;
   for (size_t i = 1; i != num_cfs; ++i) {
     start_file_number += args[i - 1].external_files.size();
@@ -6885,32 +6885,87 @@ void DBImpl::TrackOrUntrackFiles(
 
   std::set<std::string> DBImpl::RocksDBCompactionBridgeImpl::GetPredictedCompactionFiles() {
     std::set<std::string> files;
-    auto cfd = db_->default_cf_handle_ ? db_->default_cf_handle_->cfd() : nullptr;
-    if (cfd && cfd->current()) {
-      VersionStorageInfo* vstorage = cfd->current()->storage_info();
-      if (vstorage) {
-        CompactionPredictor predictor(vstorage);
-        files = predictor.PredictCompactionFiles();
+    if (!db_ || !db_->default_cf_handle_) {
+        auto* info_log_static = db_ ? db_->GetDBOptions().info_log.get() : nullptr;
+        if (info_log_static) {
+             ROCKS_LOG_WARN(info_log_static, "CompactionBridge: DBImpl or default_cf_handle_ is null for GetPredictedCompactionFiles.");
+        }
+        return files;
+    }
+    ColumnFamilyData* default_cfd = db_->default_cf_handle_->cfd();
+    if (default_cfd && default_cfd->current()) {
+      VersionStorageInfo* vstorage = default_cfd->current()->storage_info();
+      const rocksdb::ImmutableOptions* ioptions_ptr = nullptr;
+      const rocksdb::MutableCFOptions* moptions_ptr = nullptr;
+      auto* info_log = db_->GetDBOptions().info_log.get();
+
+      if (default_cfd) { // 确保 default_cfd 在这里仍然有效
+          ioptions_ptr = &default_cfd->ioptions(); 
       }
+      
+      // 初始化 moptions_ptr
+      if (default_cfd) { // 确保 default_cfd 在这里仍然有效
+          moptions_ptr = &default_cfd->GetLatestMutableCFOptions();
+      }
+
+      if (vstorage && ioptions_ptr && moptions_ptr) {
+        CompactionPredictor predictor(vstorage, ioptions_ptr, moptions_ptr, info_log);
+        files = predictor.PredictCompactionFiles();
+      } else {
+        if (info_log) {
+            std::string null_vars;
+            if (!vstorage) null_vars += "vstorage ";
+            if (!ioptions_ptr) null_vars += "ioptions_ptr "; // 使用新的指针名
+            if (!moptions_ptr) null_vars += "moptions_ptr "; // 使用新的指针名
+            ROCKS_LOG_WARN(info_log, "CompactionBridge: Failed to get necessary components for predictor for CF %s. Null variables: %s", 
+                           default_cfd ? default_cfd->GetName().c_str() : "<unknown_cfd>", null_vars.c_str());
+        }
+      }
+    } else {
+        auto* info_log_static = db_->GetDBOptions().info_log.get();
+        if (info_log_static) {
+            ROCKS_LOG_WARN(info_log_static, "CompactionBridge: Default CFD or current version not available for prediction.");
+        }
     }
     return files;
   }
 
   std::set<std::string> DBImpl::RocksDBCompactionBridgeImpl::GetCompactingFiles() {
     std::set<std::string> files;
-    auto cfd = db_->default_cf_handle_ ? db_->default_cf_handle_->cfd() : nullptr;
-    if (cfd && cfd->compaction_picker()) {
-      auto* picker = cfd->compaction_picker();
-      if (picker) {
-        for (auto* compaction : *picker->compactions_in_progress()) {
-          for (size_t i = 0; i < compaction->num_input_levels(); ++i) {
-            for (size_t j = 0; j < compaction->num_input_files(i); ++j) {
-              auto* f = compaction->input(i, j);
-              files.insert(std::to_string(f->fd.GetNumber()));
+    if (!db_ || !db_->default_cf_handle_) {
+        auto* info_log_static = db_ ? db_->GetDBOptions().info_log.get() : nullptr;
+        if (info_log_static) {
+             ROCKS_LOG_WARN(info_log_static, "CompactionBridge: DBImpl or default_cf_handle_ is null for GetCompactingFiles.");
+        }
+        return files;
+    }
+    ColumnFamilyData* default_cfd = db_->default_cf_handle_->cfd();
+    if (default_cfd) { // Check cfd is not null
+      auto* picker = default_cfd->compaction_picker();
+      if (picker) { // Check picker is not null
+        // compaction_picker()->compactions_in_progress() returns CompactionPicker::CompactionSet*
+        // which is a typedef for std::set<Compaction*>
+        const auto* compactions_in_progress = picker->compactions_in_progress();
+        if (compactions_in_progress) { // Check compactions_in_progress is not null
+          for (Compaction* compaction : *compactions_in_progress) {
+            if (compaction) { // Check compaction is not null
+              for (size_t i = 0; i < compaction->num_input_levels(); ++i) {
+                for (size_t j = 0; j < compaction->num_input_files(i); ++j) {
+                  const FileMetaData* f = compaction->input(i, j);
+                  if (f) { // Check FileMetaData is not null
+                    files.insert(std::to_string(f->fd.GetNumber()));
+                  }
+                }
+              }
             }
           }
         }
       }
+    } else {
+        auto* info_log_static = db_->GetDBOptions().info_log.get();
+        if (info_log_static) {
+            ROCKS_LOG_WARN(info_log_static, "CompactionBridge: Default CFD not available for GetCompactingFiles.");
+        }
     }
     return files;
   }

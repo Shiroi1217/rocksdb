@@ -2689,10 +2689,23 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   }
   if (s.ok()) {
   #ifdef ZENFS_ENABLED
-    if (db_options.env && db_options.env->IsZenFS()) {
-      auto zenfs = static_cast<ZenFS*>(db_options.env->GetFileSystem().get());
-      if (zenfs) {
-        zenfs->SetCompactionBridge(impl->GetCompactionBridge());
+    if (db_options.env && db_options.env->IsZenFS()) { // Assuming IsZenFS() is a method on Env or EnvWrapper
+      ZenFS* zenfs_ptr = nullptr;
+      // Attempt to get ZenFS* from the FileSystem object.
+      // This assumes FileSystem has a virtual method GetOwningZenFS or similar.
+      // You might need to adjust this based on your actual ZenFS integration.
+      if (db_options.env->GetFileSystem()) {
+          Status bridge_status = db_options.env->GetFileSystem()->GetOwningZenFS(&zenfs_ptr);
+          if (bridge_status.ok() && zenfs_ptr) {
+            zenfs_ptr->SetCompactionBridge(impl->GetCompactionBridge());
+          } else {
+            ROCKS_LOG_WARN(impl->immutable_db_options_.info_log,
+                           "Failed to get ZenFS instance from FileSystem to set CompactionBridge. Status: %s. ZenFS pointer: %p",
+                           bridge_status.ToString().c_str(), static_cast<void*>(zenfs_ptr));
+          }
+      } else {
+        ROCKS_LOG_WARN(impl->immutable_db_options_.info_log,
+                       "Cannot set CompactionBridge for ZenFS because FileSystem is null.");
       }
     }
   #endif
